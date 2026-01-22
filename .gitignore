@@ -1,0 +1,16 @@
+*.zip
+*.gz
+*.tar
+*.rar
+*.7z
+*.log
+*.tmp
+*.bak
+*.csv
+
+__pycache__
+
+data
+practice/data
+practice/图片分类/classify-leaves/images
+demo
