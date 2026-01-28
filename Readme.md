@@ -2731,4 +2731,1048 @@ loss 0.474, train acc 0.814, test acc 0.835
 
 ![nofinetuning](./src/nofinetuning.svg)
 
+### 物体检测
 
+#### 绘制框
+
+引入包：
+
+```python
+%matplotlib inline
+import torch
+from d2l import torch as d2l
+```
+
+设置绘制图像大小并显示图片：
+
+```python
+# 设置图像显示的大小，使用 d2l 库提供的默认尺寸设置
+d2l.set_figsize()
+
+# 读取当前目录下的 catdog.jpg 图片文件
+# plt.imread() 会将图片读取为一个数组（numpy array 或类似格式）
+img = d2l.plt.imread('./catdog.jpg')
+
+# 使用 matplotlib 显示读取的图片
+# imshow() 函数会将图片数组渲染成可视化的图像
+d2l.plt.imshow(img)
+```
+
+![catdog](./src/catdog.svg)
+
+注意，上面的图片y轴最上面为0；下面是两种转换函数：
+
+```python
+def box_corner_to_center(boxes):
+    """从(左上, 右下)格式转换为(中心, 宽度, 高度)格式
+    
+    参数说明：
+    boxes: 形状为 (n, 4) 的张量，每行表示一个边界框
+           格式为 [x1, y1, x2, y2]，即左上角和右下角坐标
+    
+    返回值：
+    转换后的边界框，格式为 [cx, cy, w, h]
+    其中 cx, cy 是中心点坐标，w, h 是宽度和高度
+    """
+    # 从 boxes 中提取左上角的 x 坐标（第1列）
+    x1 = boxes[:, 0]
+    # 从 boxes 中提取左上角的 y 坐标（第2列）
+    y1 = boxes[:, 1]
+    # 从 boxes 中提取右下角的 x 坐标（第3列）
+    x2 = boxes[:, 2]
+    # 从 boxes 中提取右下角的 y 坐标（第4列）
+    y2 = boxes[:, 3]
+    
+    # 计算中心点的 x 坐标：(左边 + 右边) / 2
+    cx = (x1 + x2) / 2
+    # 计算中心点的 y 坐标：(上边 + 下边) / 2
+    cy = (y1 + y2) / 2
+    # 计算宽度：右边 x 坐标 - 左边 x 坐标
+    w = x2 - x1
+    # 计算高度：下边 y 坐标 - 上边 y 坐标
+    h = y2 - y1
+    
+    # 使用 torch.stack 将四个一维张量堆叠成二维张量
+    # axis=-1 表示在最后一个维度上堆叠，得到形状为 (n, 4) 的结果
+    boxes = torch.stack((cx, cy, w, h), axis=-1)
+    return boxes
+
+def box_center_to_corner(boxes):
+    """从(中心, 宽度, 高度)格式转换为(左上, 右下)格式
+    
+    参数说明：
+    boxes: 形状为 (n, 4) 的张量，每行表示一个边界框
+           格式为 [cx, cy, w, h]，即中心点坐标和宽高
+    
+    返回值：
+    转换后的边界框，格式为 [x1, y1, x2, y2]
+    其中 x1, y1 是左上角坐标，x2, y2 是右下角坐标
+    """
+    # 从 boxes 中提取中心点的 x 坐标（第1列）
+    cx = boxes[:, 0]
+    # 从 boxes 中提取中心点的 y 坐标（第2列）
+    cy = boxes[:, 1]
+    # 从 boxes 中提取宽度（第3列）
+    w = boxes[:, 2]
+    # 从 boxes 中提取高度（第4列）
+    h = boxes[:, 3]
+    
+    # 计算左上角的 x 坐标：中心 x - 宽度的一半
+    x1 = cx - 0.5 * w
+    # 计算左上角的 y 坐标：中心 y - 高度的一半
+    y1 = cy - 0.5 * h
+    # 计算右下角的 x 坐标：中心 x + 宽度的一半
+    x2 = cx + 0.5 * w
+    # 计算右下角的 y 坐标：中心 y + 高度的一半
+    y2 = cy + 0.5 * h
+    
+    # 使用 torch.stack 将四个一维张量堆叠成二维张量
+    # axis=-1 表示在最后一个维度上堆叠，得到形状为 (n, 4) 的结果
+    boxes = torch.stack((x1, y1, x2, y2), axis=-1)
+    return boxes
+```
+
+手动验证转换函数是正确的：
+
+```python
+# 定义狗的边界框坐标（左上角和右下角）
+# 格式：[左上角x, 左上角y, 右下角x, 右下角y]
+# 坐标单位是像素，原点在图片左上角
+dog_bbox = [60.0, 45.0, 378.0, 516.0]
+
+# 定义猫的边界框坐标（左上角和右下角）
+# 格式：[左上角x, 左上角y, 右下角x, 右下角y]
+cat_bbox = [400.0, 112.0, 655.0, 493.0]
+
+# 将两个边界框列表转换为 PyTorch 张量
+# 转换后的 boxes 形状为 (2, 4)，即2个边界框，每个4个坐标值
+boxes = torch.tensor((dog_bbox, cat_bbox))
+
+# 测试格式转换函数的正确性
+# 先将角点格式转换为中心格式，再转换回角点格式
+# 使用 == 比较转换后的结果是否与原始 boxes 完全相同
+# 如果转换函数正确，应该返回全为 True 的张量
+box_center_to_corner(box_corner_to_center(boxes)) == boxes
+```
+
+输出应该为全真数组。下面是将左上右下格式转换为matplotlib格式：
+
+```python
+def bbox_to_rect(bbox, color):
+    """将边界框(左上, 右下)格式转换为matplotlib格式(左上, 宽度, 高度)
+    
+    参数说明：
+    bbox: 列表或数组，格式为 [x1, y1, x2, y2]
+          x1, y1 是左上角坐标，x2, y2 是右下角坐标
+    color: 字符串，指定矩形框的颜色，如 'blue', 'red' 等
+    
+    返回值：
+    matplotlib.patches.Rectangle 对象，可以添加到图像上
+    """
+    # 创建并返回一个 matplotlib 的 Rectangle（矩形）对象
+    return d2l.plt.Rectangle(
+        # xy 参数：矩形左上角的坐标 (x, y)
+        xy=(bbox[0], bbox[1]),
+        # width 参数：矩形的宽度 = 右下角x - 左上角x
+        width=bbox[2] - bbox[0],
+        # height 参数：矩形的高度 = 右下角y - 左上角y
+        height=bbox[3] - bbox[1],
+        # fill 参数：False 表示不填充矩形内部，只画边框
+        fill=False,
+        # edgecolor 参数：边框的颜色
+        edgecolor=color,
+        # linewidth 参数：边框线条的宽度（像素）
+        linewidth=2
+    )
+
+# 显示原始图片，并将返回的图像对象保存到 fig 变量
+# 这样我们就可以在图片上添加其他元素（如边界框）
+fig = d2l.plt.imshow(img)
+
+# 在图像上添加狗的边界框（蓝色）
+# fig.axes 是图像的坐标轴对象
+# add_patch() 方法将矩形框添加到图像上
+fig.axes.add_patch(bbox_to_rect(dog_bbox, 'blue'))
+
+# 在图像上添加猫的边界框（红色）
+fig.axes.add_patch(bbox_to_rect(cat_bbox, 'red'))
+```
+
+绘制出来的效果如下：
+
+![catdog-k](./src/catdog-k.svg)
+
+
+#### 数据集
+
+引入包：
+
+```python
+%matplotlib inline
+import os
+import pandas as pd
+import torch
+import torchvision
+from d2l import torch as d2l
+```
+
+定义d2l的数据格式，方便读取或者下载数据集：
+
+```python
+# 在 d2l 库的数据中心(DATA_HUB)中注册香蕉检测数据集
+# DATA_HUB 是一个字典，存储了各种数据集的下载链接和校验码
+d2l.DATA_HUB['banana-detection'] = (
+    # 第一个元素：数据集的下载 URL
+    # DATA_URL 是 d2l 库中定义的基础数据 URL
+    d2l.DATA_URL + 'banana-detection.zip',
+    # 第二个元素：数据集的 SHA-1 校验码，用于验证下载文件的完整性
+    # 确保下载的文件没有损坏或被篡改
+    '5de26c8fce5ccdea9f91267273464dc968d20d72'
+)
+```
+
+读取数据集：
+
+```python
+def read_data_bananas(is_train=True):
+    """读取香蕉检测数据集中的图像和标签
+    
+    参数说明：
+    is_train: 布尔值，True 表示读取训练集，False 表示读取验证集
+    
+    返回值：
+    images: 图像列表，每个元素是一个图像张量
+    targets: 标签张量，形状为 (样本数, 1, 5)，包含类别和边界框坐标
+    """
+    # 下载并解压香蕉检测数据集，返回数据集所在的目录路径
+    # 一般为../data/banana-detection
+    data_dir = d2l.download_extract('banana-detection')
+    
+    # 构造 CSV 标签文件的完整路径
+    # os.path.join() 用于拼接路径，适配不同操作系统
+    # 根据 is_train 参数选择训练集或验证集的文件夹
+    csv_fname = os.path.join(
+        data_dir, 
+        'bananas_train' if is_train else 'bananas_val',  # 选择训练或验证文件夹
+        'label.csv'  # 标签文件名
+    )
+    
+    # 使用 pandas 读取 CSV 文件
+    # CSV 文件包含图像文件名和对应的标签信息（类别、边界框坐标）
+    csv_data = pd.read_csv(csv_fname)
+    
+    # 将 'img_name' 列设置为索引，方便后续通过图像名称访问数据
+    csv_data = csv_data.set_index('img_name')
+    
+    # 初始化两个空列表，用于存储图像和标签
+    images, targets = [], []
+    
+    # 遍历 CSV 数据的每一行
+    # iterrows() 返回索引（img_name）和该行数据（target）
+    for img_name, target in csv_data.iterrows():
+        # 读取并添加图像到 images 列表
+        images.append(
+            # torchvision.io.read_image() 读取图像文件并转换为张量
+            torchvision.io.read_image(
+                # 构造图像文件的完整路径
+                os.path.join(
+                    data_dir,  # 数据集根目录
+                    'bananas_train' if is_train else 'bananas_val',  # 训练或验证文件夹
+                    'images',  # 图像文件夹
+                    f'{img_name}'  # 图像文件名（使用 f-string 格式化）
+                )
+            )
+        )
+        # 将当前行的标签数据转换为列表并添加到 targets
+        # target 包含类别和边界框的坐标信息
+        targets.append(list(target))
+    
+    # 将标签列表转换为 PyTorch 张量
+    # unsqueeze(1) 在第二个维度增加一维，从 (n, 5) 变为 (n, 1, 5)
+    # 除以 256 是为了将像素坐标归一化到 [0, 1] 范围
+    # （假设图像尺寸为 256x256）
+    return images, torch.tensor(targets).unsqueeze(1) / 256
+```
+
+定义数据集类, 简单起见， 只定义`getitem`, `len`方法：
+
+```python
+class BananasDataset(torch.utils.data.Dataset):
+    """香蕉检测数据集类
+    
+    继承自 torch.utils.data.Dataset，这是 PyTorch 中自定义数据集的标准方式
+    需要实现三个方法：__init__、__getitem__、__len__
+    """
+    
+    def __init__(self, is_train=True):
+        """初始化数据集
+        
+        参数说明：
+        is_train: 布尔值，True 表示加载训练集，False 表示加载验证集
+        """
+        # 调用 read_data_bananas 函数读取图像和标签
+        # self.features 存储所有图像数据
+        # self.labels 存储所有标签数据
+        self.features, self.labels = read_data_bananas(is_train)
+        
+        # 打印读取的样本数量，方便用户了解数据集大小
+        # str(len(self.features)) 将样本数量转换为字符串
+        # 使用三元运算符根据 is_train 选择不同的提示文本
+        print('read ' + str(len(self.features)) + 
+              (' training examples' if is_train else ' validation examples'))
+
+    def __getitem__(self, idx):
+        """获取指定索引的样本
+        
+        参数说明：
+        idx: 整数，样本的索引位置
+        
+        返回值：
+        元组 (图像, 标签)
+        """
+        # 返回第 idx 个样本
+        # self.features[idx].float() 将图像张量转换为浮点型（便于后续计算）
+        # self.labels[idx] 返回对应的标签
+        return (self.features[idx].float(), self.labels[idx])
+
+    def __len__(self):
+        """返回数据集的样本总数
+        
+        返回值：
+        整数，数据集中的样本数量
+        """
+        # 返回特征列表的长度，即样本总数
+        return len(self.features)
+```
+
+定义加载数据集到内存的函数，一般情况下不能这么做，因为当前数据集较小，则直接加载到内存中：
+
+```python
+def load_data_bananas(batch_size):
+    """加载香蕉检测数据集，返回训练和验证数据迭代器
+    
+    参数说明：
+    batch_size: 整数，每个批次包含的样本数量
+    
+    返回值：
+    train_iter: 训练集数据迭代器
+    val_iter: 验证集数据迭代器
+    """
+    # 创建训练集的数据加载器（DataLoader）
+    train_iter = torch.utils.data.DataLoader(
+        # 第一个参数：BananasDataset 训练集对象
+        BananasDataset(is_train=True),
+        # 第二个参数：批次大小，决定每次迭代返回多少个样本
+        batch_size,
+        # shuffle=True：每个 epoch 开始时打乱数据顺序
+        # 这有助于提高模型的泛化能力，避免学习到数据的顺序信息
+        shuffle=True
+    )
+    
+    # 创建验证集的数据加载器
+    val_iter = torch.utils.data.DataLoader(
+        # 第一个参数：BananasDataset 验证集对象
+        BananasDataset(is_train=False),
+        # 第二个参数：批次大小
+        batch_size
+        # 注意：验证集不需要打乱数据，所以没有 shuffle 参数
+    )
+    
+    # 返回训练集和验证集的迭代器
+    return train_iter, val_iter
+```
+
+设置一些参数，由于一张图中可能存在多个待检测物体，不应给每个batch给的很大；一般来说是给每个图限制其中最多有多少待检测物体。
+
+```python
+# 设置批次大小为 32（每次读取 32 个样本）
+batch_size = 32
+
+# 设置图像边长为 256 像素（用于后续坐标还原）
+edge_size = 256
+
+# 加载香蕉检测数据集，获取训练集和验证集的迭代器
+train_iter, val_iter = load_data_bananas(batch_size)
+
+# 从训练集迭代器中获取第一个批次的数据
+# iter(train_iter) 将数据加载器转换为迭代器
+# next() 获取迭代器的下一个元素（即第一个批次）
+batch = next(iter(train_iter))
+
+# 打印批次数据的形状
+# batch[0] 是图像数据，形状为 (batch_size, channels, height, width)
+# batch[1] 是标签数据，形状为 (batch_size, 1, 5)
+# 5 个值分别是：类别、左上角x、左上角y、右下角x、右下角y（归一化坐标）
+print(batch[0].shape, batch[1].shape)
+```
+
+注意，这里打印的消息如下：
+
+```python
+read 100 validation examples
+torch.Size([32, 3, 256, 256]) torch.Size([32, 1, 5])
+```
+
+其中第一个tensor的内容是：【batch_size, RGP通道数, 图片长, 图片高】；第二个tensor的内容是：【batch_size, 每张图待检测物体上限, 类别+4个坐标点】
+
+显示10张图片：
+
+```python
+# 从批次中取出前 10 张图像进行可视化
+# batch[0][0:10] 选择前 10 个样本的图像
+# permute(0,2,3,1) 调整张量维度顺序：
+#   从 (batch, channels, height, width) 
+#   变为 (batch, height, width, channels)
+#   这是因为 matplotlib 显示图像需要 (height, width, channels) 格式
+# 除以 255 将像素值从 [0, 255] 归一化到 [0, 1] 范围
+imgs = (batch[0][0:10].permute(0, 2, 3, 1)) / 255
+
+# 使用 d2l 库的 show_images 函数显示图像网格
+# 参数说明：
+#   imgs: 要显示的图像列表
+#   2: 显示 2 行
+#   5: 显示 5 列（总共 2x5=10 张图像）
+#   scale=2: 图像显示的缩放比例
+# 返回值 axes 是一个包含所有子图坐标轴对象的列表
+axes = d2l.show_images(imgs, 2, 5, scale=2)
+
+# 遍历每个子图和对应的标签，在图像上绘制边界框
+# zip(axes, batch[1][0:10]) 将坐标轴和标签配对
+for ax, label in zip(axes, batch[1][0:10]):
+    # 在当前子图上显示边界框
+    d2l.show_bboxes(
+        ax,  # 当前子图的坐标轴对象
+        # label[0][1:5] 提取边界框坐标（跳过第一个元素，即类别）
+        # [1:5] 表示取索引 1 到 4 的元素：左上角x、左上角y、右下角x、右下角y
+        # * edge_size 将归一化坐标 [0, 1] 还原为实际像素坐标 [0, 256]
+        # 外层的 [] 是因为 show_bboxes 需要一个边界框列表
+        [label[0][1:5] * edge_size],
+        # colors=['w'] 设置边界框颜色为白色（white）
+        colors=['w']
+    )
+```
+
+![banana-10](./src/banana-10.png)
+
+#### 锚框
+
+锚框是预先在图像上定义好的一系列大小和比例固定的参考框。
+
+在深度学习模型（如 Faster R-CNN, SSD, YOLO v3 等）进行预测时，它并不是凭空去猜目标在哪里，而是基于这些锚框进行两步走：
+
+1. 分类：判断这个锚框里是否有物体，以及是什么物体。
+2. 回归：如果框内有物体，微调锚框的边缘（偏移量），使其更精确地贴合目标的真实边界（Ground Truth）。
+
+IoU（交并比）计算的是两个集合（通常是预测框 $A$ 和真实框 $B$）的交集面积与并集面积之比。其计算公式如下：
+
+$$J(A,B)=\frac{\vert A \cap B \vert}{\vert A \cup B \vert}$$
+
+赋予锚框标号：
+
+* 每个锚框是一个训练样本
+* 将每个锚框，要么标注背景，要么要么关联一个真实边缘框
+* 真实数据集中会有大量锚框，这样会产生大量负类样本
+
+我们需要将每个锚框分配到一个类别（某个物体或背景）以及一个偏移量。这个过程本质上是一个二分图匹配问题。可以参考d2l书籍的571页的例子。视频中描述不是很详细，现做描述如下：
+
+分配算法，匈牙利算法的简化版本：假设有 $n$ 个锚框，$m$ 个真实框，我们会构建一个 $n \times m$ 的矩阵，其中每个元素是锚框 $A_i$ 与真实框 $G_j$ 的 IoU 值。
+
+步骤如下：
+
+1. 寻找全局最大值：在整个矩阵中找到 IoU 最大的单元格（假设是 $A_i$ 和 $G_j$）。
+2. 锁定匹配：将 $G_j$ 分配给 $A_i$。此时，$A_i$ 就不再参与其他匹配，$G_j$ 也被“领走”了。
+3. 剔除行列：从矩阵中删除第 $i$ 行和第 $j$ 列。
+4. 循环往复：重复上述过程，直到所有的真实框 $G$ 都找到了对应的锚框。
+5. 处理剩余锚框：
+    * 对于那些没被选中的锚框，如果它与某个 $G$ 的 IoU 超过了预设阈值（如 0.5），也可以将其分配给该 $G$。
+    * IoU 低于阈值的锚框全部设为 负样本（背景）。
+
+去除重复框算法，极大值抑制（NMS）：
+
+在目标检测的预测阶段（Inference），模型通常会针对同一个物体生成大量重叠的预测框。非极大值抑制（Non-Maximum Suppression, NMS） 的作用就是从这些重叠的框中，“压制”掉那些冗余的，只保留最精准的那一个。
+
+步骤如下：
+
+1. 排序：将所有框按置信度得分从高到低进行降序排列。得分最高的框被认为是最有可能是该物体的。
+2. 选择与压制：
+    1. 取最高分：从列表中取出得分最高的框（称其为 $A$），将其作为“最终保留框”存入结果列表。
+    2. 计算 IoU：将剩余的所有框（$B, C, D...$）分别与这个 $A$ 计算 IoU（交并比）。
+    3. 剔除重叠者：如果某个框与 $A$ 的 IoU 超过了预设的阈值（通常设为 0.5），说明这个框很可能是在重复预测同一个物体。直接把这个框从候选中删掉（抑制）。
+3. 循环：在剩余的候选框中，重复上述步骤：再次取最高分，剔除高重叠框。直到候选列表变为空。
+
+**锚框生成算法视频中讲的很粗糙，只是给出简单实现，现做说明如下：**
+
+算法：基于缩放比和宽高比的组合：这是最基础的方法，即在特征图的每个像素中心，根据预设的参数生成一组锚框。
+
+核心参数：
+* 缩放比 (Scale, $s$)：指锚框相对于原始图像的大小（如 0.1, 0.2 等）。
+* 宽高比 (Aspect Ratio, $r$)：指锚框的宽与高的比例（如 1:1[1], 1:2[0.5], 2:1[2]）。
+
+那么锚框的宽高可以直接计算出来，设原始图像的宽为$w$高为$s$, 则：（可能有问题，以代码为主）
+* 锚框的宽：$w \cdot \sqrt{s \cdot r}$
+* 锚框的高：$\frac{h \cdot s}{\sqrt{r}}$
+
+生成逻辑：
+
+如果设定 $n$ 个缩放比 $[s_1, ..., s_n]$ 和 $m$ 个宽高比 $[r_1, ..., r_m]$，理论上每个像素点会产生 $n \times m$ 个锚框。但为了降低计算量，D2L 和许多算法通常只取包含 $s_1$ 或 $r_1$ 的组合，即：
+
+$$(s_1, r_1), (s_1, r_2), \dots, (s_1, r_m), (s_2, r_1), (s_3, r_1), \dots, (s_n, r_1)$$
+
+这样每个像素点只生成 $n + m - 1$ 个锚框。
+
+代码实现如下：
+
+```python
+%matplotlib inline
+import torch
+from d2l import torch as d2l
+
+# 设置PyTorch打印张量时只显示2位小数，方便查看结果
+torch.set_printoptions(2)
+
+def multibox_prior(data, sizes, ratios):
+    """生成以每个像素为中心具有不同形状的锚框
+    
+    参数:
+        data: 输入特征图，shape为(batch_size, channels, height, width)
+        sizes: 锚框的尺度列表，如[0.75, 0.5, 0.25]
+        ratios: 锚框的宽高比列表，如[1, 2, 0.5]
+    返回:
+        所有锚框的坐标，shape为(1, 锚框总数, 4)
+    """
+    # 获取输入特征图的高度和宽度
+    in_height, in_width = data.shape[-2:]
+    # 获取设备信息（CPU或GPU）、尺度数量、宽高比数量
+    device, num_sizes, num_ratios = data.device, len(sizes), len(ratios)
+    # 计算每个像素位置生成的锚框数量 = n + m - 1（避免重复计算size[0]*ratio[0]）
+    boxes_per_pixel = (num_sizes + num_ratios - 1)
+    # 将尺度列表转换为张量并放到相应设备上
+    size_tensor = torch.tensor(sizes, device=device)
+    # 将宽高比列表转换为张量并放到相应设备上
+    ratio_tensor = torch.tensor(ratios, device=device)
+
+    # 为了将锚点移动到像素的中心，需要设置偏移量。
+    # 因为一个像素的高为1且宽为1，我们选择偏移我们的中心0.5
+    offset_h, offset_w = 0.5, 0.5
+    # 计算在y轴（高度）上的步长，将像素坐标归一化到[0,1]范围
+    steps_h = 1.0 / in_height
+    # 计算在x轴（宽度）上的步长，将像素坐标归一化到[0,1]范围
+    steps_w = 1.0 / in_width
+
+    # 生成锚框的所有中心点
+    # 生成每个像素在高度方向的归一化中心坐标
+    center_h = (torch.arange(in_height, device=device) + offset_h) * steps_h
+    # 生成每个像素在宽度方向的归一化中心坐标
+    center_w = (torch.arange(in_width, device=device) + offset_w) * steps_w
+    # 使用meshgrid生成所有像素位置的网格坐标
+    shift_y, shift_x = torch.meshgrid(center_h, center_w, indexing='ij')
+    # 将二维网格展平成一维向量，方便后续处理
+    shift_y, shift_x = shift_y.reshape(-1), shift_x.reshape(-1)
+
+    # 生成"boxes_per_pixel"个高和宽，
+    # 之后用于创建锚框的四角坐标(xmin,xmax,ymin,ymax)
+    # 计算锚框的宽度：先根据第一个比例和所有尺度计算，再根据第一个尺度和其他比例计算
+    w = torch.cat((size_tensor * torch.sqrt(ratio_tensor[0]),
+                   sizes[0] * torch.sqrt(ratio_tensor[1:])))\
+                   * in_height / in_width  # 乘以高宽比来处理矩形输入图像
+    # 计算锚框的高度：同样的组合方式
+    h = torch.cat((size_tensor / torch.sqrt(ratio_tensor[0]),
+                   sizes[0] / torch.sqrt(ratio_tensor[1:])))
+    # 将宽度和高度除以2来获得半宽和半高，构建相对于中心点的偏移
+    # stack成(-w/2, -h/2, w/2, h/2)的形式，然后为每个像素位置重复
+    anchor_manipulations = torch.stack((-w, -h, w, h)).T.repeat(
+                                        in_height * in_width, 1) / 2
+
+    # 每个中心点都将有"boxes_per_pixel"个锚框，
+    # 所以生成含所有锚框中心的网格，重复了"boxes_per_pixel"次
+    # 将每个像素的中心坐标堆叠4次（对应xmin, ymin, xmax, ymax）
+    out_grid = torch.stack([shift_x, shift_y, shift_x, shift_y],
+                dim=1).repeat_interleave(boxes_per_pixel, dim=0)
+    # 中心坐标加上相对偏移得到最终的锚框坐标（xmin, ymin, xmax, ymax）
+    output = out_grid + anchor_manipulations
+    # 在第0维增加batch维度，返回shape为(1, 锚框总数, 4)
+    return output.unsqueeze(0)
+
+# 读取猫狗图片
+img = d2l.plt.imread('./catdog.jpg')
+# 获取图片的高度和宽度（前两个维度）
+h, w = img.shape[:2]
+# 打印图片尺寸信息
+print (f'height: {h}, width: {w}')
+
+# 创建一个随机张量模拟特征图，shape为(batch_size=1, channels=3, height=h, width=w)
+X = torch.rand(size=(1, 3, h, w))
+# 调用multibox_prior生成锚框
+# sizes=[0.75, 0.5, 0.25]: 三种尺度
+# ratios=[1, 2, 0.5]: 三种宽高比
+# 每个像素会生成 3+3-1=5 个锚框
+Y = multibox_prior(X, sizes=[0.75, 0.5, 0.25],
+                      ratios=[1, 2, 0.5])
+# 打印锚框张量的形状
+# 输出: (batch_size=1, 锚框数量=h*w*5, 4个坐标值)
+print(Y.shape)
+# 输出：
+# height: 561, width: 728
+# torch.Size([1, 2042040, 4])
+
+# 将锚框重新整形为(height, width, 每像素锚框数, 4个坐标)
+boxes = Y.reshape(h, w, 5, 4)
+# 查看位置(250, 250)处的第1个锚框的坐标
+# 输出格式: [xmin, ymin, xmax, ymax]
+print(boxes[250, 250, 0, :])
+# tensor([0.06, 0.07, 0.63, 0.82])
+
+def show_bboxes(axes, bboxes, labels=None, colors=None):
+    """在图像上显示所有边界框
+    
+    参数:
+        axes: matplotlib的坐标轴对象
+        bboxes: 边界框列表，每个框为[xmin, ymin, xmax, ymax]
+        labels: 每个框的标签文本（可选）
+        colors: 每个框的颜色（可选）
+    """
+    def _make_list(obj, default_values=None):
+        """辅助函数：将单个对象转换为列表"""
+        # 如果对象为None，使用默认值
+        if obj is None:
+            obj = default_values
+        # 如果不是列表或元组，转换为列表
+        elif not isinstance(obj, (list, tuple)):
+            obj = [obj]
+        return obj
+
+    # 将标签转换为列表形式
+    labels = _make_list(labels)
+    # 将颜色转换为列表，默认使用蓝、绿、红、品红、青色
+    colors = _make_list(colors, ['b', 'g', 'r', 'm', 'c'])
+    # 遍历所有边界框
+    for i, bbox in enumerate(bboxes):
+        # 循环使用颜色列表中的颜色
+        color = colors[i % len(colors)]
+        # 将边界框转换为matplotlib的矩形对象
+        rect = d2l.bbox_to_rect(bbox.detach().numpy(), color)
+        # 将矩形添加到图像上
+        axes.add_patch(rect)
+        # 如果提供了标签
+        if labels and len(labels) > i:
+            # 根据框的颜色选择文本颜色（白底用黑字，其他用白字）
+            text_color = 'k' if color == 'w' else 'w'
+            # 在矩形的左上角添加文本标签
+            axes.text(rect.xy[0], rect.xy[1], labels[i],
+                      va='center', ha='center', fontsize=9, color=text_color,
+                      bbox=dict(facecolor=color, lw=0))
+
+# 设置图形的显示大小
+d2l.set_figsize()
+# 创建缩放因子，用于将归一化坐标[0,1]还原到像素坐标
+# (w, h, w, h)对应(xmin, ymin, xmax, ymax)的缩放
+bbox_scale = torch.tensor((w, h, w, h))
+# 显示原始图片
+fig = d2l.plt.imshow(img)
+# 在图片上绘制位置(250, 250)处的5个锚框
+# 将归一化坐标乘以缩放因子得到像素坐标
+show_bboxes(fig.axes, boxes[250, 250, :, :] * bbox_scale, [
+    's=0.75, r=1',   # 尺度0.75，宽高比1:1
+    's=0.5, r=1',    # 尺度0.5，宽高比1:1
+    's=0.25, r=1',   # 尺度0.25，宽高比1:1
+    's=0.75, r=2',   # 尺度0.75，宽高比2:1
+    's=0.75, r=0.5'  # 尺度0.75，宽高比0.5:1
+])
+```
+![mk-1](./src/mk-1.svg)
+```python
+def box_iou(boxes1, boxes2):
+    """计算两个锚框或边界框列表中成对的交并比（IoU）
+    
+    参数:
+        boxes1: 第一组边界框，shape为(N, 4)，格式为(xmin, ymin, xmax, ymax)
+        boxes2: 第二组边界框，shape为(M, 4)，格式为(xmin, ymin, xmax, ymax)
+    返回:
+        IoU矩阵，shape为(N, M)，每个元素是boxes1[i]和boxes2[j]的IoU
+    """
+    # 定义Lambda函数计算边界框面积 = 宽度 × 高度
+    box_area = lambda boxes: ((boxes[:, 2] - boxes[:, 0]) *
+                              (boxes[:, 3] - boxes[:, 1]))
+    # boxes1,boxes2,areas1,areas2的形状:
+    # boxes1：(boxes1的数量,4),
+    # boxes2：(boxes2的数量,4),
+    # areas1：(boxes1的数量,),
+    # areas2：(boxes2的数量,)
+    # 计算第一组所有边界框的面积
+    areas1 = box_area(boxes1)
+    # 计算第二组所有边界框的面积
+    areas2 = box_area(boxes2)
+    # inter_upperlefts,inter_lowerrights,inters的形状:
+    # (boxes1的数量,boxes2的数量,2)
+    # 计算相交区域的左上角坐标：取两个框左上角的最大值
+    # boxes1[:, None, :2]添加维度用于广播，shape变为(N, 1, 2)
+    inter_upperlefts = torch.max(boxes1[:, None, :2], boxes2[:, :2])
+    # 计算相交区域的右下角坐标：取两个框右下角的最小值
+    inter_lowerrights = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
+    # 计算相交区域的宽度和高度，如果不相交则为0（使用clamp限制最小值为0）
+    inters = (inter_lowerrights - inter_upperlefts).clamp(min=0)
+    # inter_areas和union_areas的形状:(boxes1的数量,boxes2的数量)
+    # 计算相交区域的面积 = 宽 × 高
+    inter_areas = inters[:, :, 0] * inters[:, :, 1]
+    # 计算并集面积 = 面积1 + 面积2 - 交集面积
+    union_areas = areas1[:, None] + areas2 - inter_areas
+    # 返回IoU = 交集面积 / 并集面积
+    return inter_areas / union_areas
+
+#@save
+def assign_anchor_to_bbox(ground_truth, anchors, device, iou_threshold=0.5):
+    """将最接近的真实边界框分配给锚框
+    
+    参数:
+        ground_truth: 真实边界框，shape为(M, 4)
+        anchors: 锚框，shape为(N, 4)
+        device: 计算设备
+        iou_threshold: IoU阈值，默认0.5
+    返回:
+        anchors_bbox_map: 锚框到真实框的映射，shape为(N,)，-1表示背景
+    """
+    # 获取锚框数量和真实边界框数量
+    num_anchors, num_gt_boxes = anchors.shape[0], ground_truth.shape[0]
+    # 计算所有锚框和真实框之间的IoU矩阵
+    # jaccard[i, j]表示第i个锚框和第j个真实框的IoU值
+    jaccard = box_iou(anchors, ground_truth)
+    # 创建锚框到真实框的映射张量，初始化为-1（表示背景）
+    anchors_bbox_map = torch.full((num_anchors,), -1, dtype=torch.long,
+                                  device=device)
+    # 根据阈值，决定是否分配真实边界框
+    # 对每个锚框，找到IoU最大的真实框及其IoU值
+    max_ious, indices = torch.max(jaccard, dim=1)
+    # 找出IoU大于等于阈值的锚框索引
+    anc_i = torch.nonzero(max_ious >= iou_threshold).reshape(-1)
+    # 获取这些锚框对应的最佳真实框索引
+    box_j = indices[max_ious >= iou_threshold]
+    # 将满足阈值条件的锚框分配给对应的真实框
+    anchors_bbox_map[anc_i] = box_j
+    # 创建用于标记已处理列的张量（填充-1）
+    col_discard = torch.full((num_anchors,), -1)
+    # 创建用于标记已处理行的张量（填充-1）
+    row_discard = torch.full((num_gt_boxes,), -1)
+    # 确保每个真实框至少分配给一个锚框（即使IoU小于阈值）
+    for _ in range(num_gt_boxes):
+        # 找到IoU矩阵中的最大值索引
+        max_idx = torch.argmax(jaccard)
+        # 将一维索引转换为二维坐标：真实框索引
+        box_idx = (max_idx % num_gt_boxes).long()
+        # 将一维索引转换为二维坐标：锚框索引
+        anc_idx = (max_idx / num_gt_boxes).long()
+        # 将该锚框分配给该真实框
+        anchors_bbox_map[anc_idx] = box_idx
+        # 将该真实框对应的列设为-1，避免重复分配
+        jaccard[:, box_idx] = col_discard
+        # 将该锚框对应的行设为-1，避免重复分配
+        jaccard[anc_idx, :] = row_discard
+    # 返回锚框到真实框的映射
+    return anchors_bbox_map
+
+def offset_boxes(anchors, assigned_bb, eps=1e-6):
+    """计算锚框相对于分配的真实边界框的偏移量（用于训练）
+    
+    参数:
+        anchors: 锚框，格式为(xmin, ymin, xmax, ymax)
+        assigned_bb: 分配的真实边界框，格式相同
+        eps: 极小值，防止除零或对数运算出错
+    返回:
+        偏移量，格式为(offset_x, offset_y, offset_w, offset_h)
+    """
+    # 将锚框从角点格式转换为中心格式(center_x, center_y, width, height)
+    c_anc = d2l.box_corner_to_center(anchors)
+    # 将真实框从角点格式转换为中心格式
+    c_assigned_bb = d2l.box_corner_to_center(assigned_bb)
+    # 计算中心点的偏移量：(真实框中心 - 锚框中心) / 锚框尺寸
+    # 归一化后的偏移量，使其与锚框大小无关
+    offset_xy = (c_assigned_bb[:, :2] - c_anc[:, :2]) / c_anc[:, 2:]
+    # 计算宽高的偏移量：log(真实框尺寸 / 锚框尺寸)
+    # 使用对数变换使得尺度变化更加平滑
+    offset_wh = torch.log(eps + c_assigned_bb[:, 2:] / c_anc[:, 2:])
+    # 拼接xy偏移和wh偏移，返回完整的偏移量
+    return torch.cat([offset_xy, offset_wh], axis=1)
+
+def multibox_target(anchors, labels):
+    """使用真实边界框标记锚框（生成训练目标）
+    
+    参数:
+        anchors: 所有锚框，shape为(1, N, 4)
+        labels: 真实标签，shape为(batch_size, M, 5)，每行为(类别, xmin, ymin, xmax, ymax)
+    返回:
+        bbox_offset: 边界框偏移量，shape为(batch_size, N*4)
+        bbox_mask: 掩码，标记哪些锚框需要参与损失计算
+        class_labels: 类别标签，shape为(batch_size, N)
+    """
+    # 获取批次大小，并去除anchors的batch维度
+    batch_size, anchors = labels.shape[0], anchors.squeeze(0)
+    # 初始化三个列表，用于存储每个样本的结果
+    batch_offset, batch_mask, batch_class_labels = [], [], []
+    # 获取设备信息和锚框数量
+    device, num_anchors = anchors.device, anchors.shape[0]
+    # 遍历批次中的每个样本
+    for i in range(batch_size):
+        # 获取第i个样本的标签
+        label = labels[i, :, :]
+        # 将锚框分配给真实边界框
+        # label[:, 1:]提取真实框坐标（去掉类别列）
+        anchors_bbox_map = assign_anchor_to_bbox(
+            label[:, 1:], anchors, device)
+        # 创建边界框掩码：被分配的锚框（非背景）mask为1，背景为0
+        # unsqueeze(-1)增加维度后repeat(1,4)，使每个坐标都有mask
+        bbox_mask = ((anchors_bbox_map >= 0).float().unsqueeze(-1)).repeat(
+            1, 4)
+        # 将类标签和分配的边界框坐标初始化为零
+        # 初始化所有锚框的类别标签为0（背景类）
+        class_labels = torch.zeros(num_anchors, dtype=torch.long,
+                                   device=device)
+        # 初始化所有锚框的分配边界框坐标为0
+        assigned_bb = torch.zeros((num_anchors, 4), dtype=torch.float32,
+                                  device=device)
+        # 使用真实边界框来标记锚框的类别。
+        # 如果一个锚框没有被分配，标记其为背景（值为零）
+        # 找到所有被分配了真实框的锚框索引（即非背景锚框）
+        indices_true = torch.nonzero(anchors_bbox_map >= 0)
+        # 获取这些锚框对应的真实框索引
+        bb_idx = anchors_bbox_map[indices_true]
+        # 为这些锚框分配类别标签（+1是因为0是背景类）
+        class_labels[indices_true] = label[bb_idx, 0].long() + 1
+        # 为这些锚框分配对应的真实框坐标
+        assigned_bb[indices_true] = label[bb_idx, 1:]
+        # 偏移量转换
+        # 计算锚框相对于真实框的偏移量，并应用掩码（背景锚框的偏移量为0）
+        offset = offset_boxes(anchors, assigned_bb) * bbox_mask
+        # 将偏移量展平并添加到批次列表
+        batch_offset.append(offset.reshape(-1))
+        # 将掩码展平并添加到批次列表
+        batch_mask.append(bbox_mask.reshape(-1))
+        # 将类别标签添加到批次列表
+        batch_class_labels.append(class_labels)
+    # 将列表堆叠成张量，shape为(batch_size, ...)
+    bbox_offset = torch.stack(batch_offset)
+    bbox_mask = torch.stack(batch_mask)
+    class_labels = torch.stack(batch_class_labels)
+    # 返回偏移量、掩码和类别标签
+    return (bbox_offset, bbox_mask, class_labels)
+
+# 定义真实边界框：格式为[类别, xmin, ymin, xmax, ymax]
+# 类别0是狗，类别1是猫
+ground_truth = torch.tensor([[0, 0.1, 0.08, 0.52, 0.92],   # 狗的边界框
+                         [1, 0.55, 0.2, 0.9, 0.88]])  # 猫的边界框
+# 定义5个手动创建的锚框用于演示
+anchors = torch.tensor([[0, 0.1, 0.2, 0.3],      # 锚框0
+                    [0.15, 0.2, 0.4, 0.4],    # 锚框1
+                    [0.63, 0.05, 0.88, 0.98], # 锚框2
+                    [0.66, 0.45, 0.8, 0.8],   # 锚框3
+                    [0.57, 0.3, 0.92, 0.9]])  # 锚框4
+
+# 显示图片
+fig = d2l.plt.imshow(img)
+# 绘制真实边界框（ground_truth[:, 1:]去掉类别列）
+# 使用黑色('k')标记，标签为'dog'和'cat'
+show_bboxes(fig.axes, ground_truth[:, 1:] * bbox_scale, ['dog', 'cat'], 'k')
+# 绘制锚框，使用默认颜色，标签为锚框编号
+show_bboxes(fig.axes, anchors * bbox_scale, ['0', '1', '2', '3', '4'])
+```
+![mk-2](./src/mk-2.svg)
+```python
+# 调用multibox_target生成训练标签
+# unsqueeze(dim=0)为anchors和ground_truth添加batch维度
+labels = multibox_target(anchors.unsqueeze(dim=0), ground_truth.unsqueeze(dim=0))
+
+# 打印类标签（labels[2]）
+# 0表示背景，1表示狗，2表示猫
+print(labels[2])
+
+# 打印边界框偏移量（labels[0]）
+# 每四个值(offset_x, offset_y, offset_w, offset_h)表示一个锚框的偏移
+print(labels[0])
+# 打印边界框掩码（labels[1]）
+# 值为1表示该位置需要参与损失计算，0表示背景不参与
+print(labels[1])
+
+# tensor([[0, 1, 2, 0, 2]]) 
+# tensor([[-0.00e+00, -0.00e+00, -0.00e+00, -0.00e+00,  1.40e-01,  1.00e+00,
+#           5.19e-01,  1.44e+00, -1.20e-01,  2.69e-02,  3.36e-01, -3.13e-01,
+#          -0.00e+00, -0.00e+00, -0.00e+00, -0.00e+00, -5.71e-02, -1.00e-01,
+#           8.34e-07,  1.25e-01]])
+# tensor([[0., 0., 0., 0., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 0., 1., 1.,
+#          1., 1.]])
+
+def offset_inverse(anchors, offset_preds):
+    """根据锚框和预测的偏移量反推出预测的边界框（用于推理）
+    
+    参数:
+        anchors: 锚框，格式为(xmin, ymin, xmax, ymax)
+        offset_preds: 模型预测的偏移量，格式为(offset_x, offset_y, offset_w, offset_h)
+    返回:
+        predicted_bbox: 预测的边界框，格式为(xmin, ymin, xmax, ymax)
+    """
+    # 将锚框从角点格式转换为中心格式
+    anc = d2l.box_corner_to_center(anchors)
+    # 根据预测的中心偏移量计算预测框的中心坐标
+    # 公式：预测中心 = 锚框中心 + (预测偏移 × 锚框尺寸 / 10)
+    # 除以10是经验性的缩放因子
+    pred_bbox_xy = (offset_preds[:, :2] * anc[:, 2:] / 10) + anc[:, :2]
+    # 根据预测的尺寸偏移量计算预测框的宽高
+    # 公式：预测尺寸 = 锚框尺寸 × exp(预测偏移 / 5)
+    # 除以5是经验性的缩放因子
+    pred_bbox_wh = torch.exp(offset_preds[:, 2:] / 5) * anc[:, 2:]
+    # 拼接中心坐标和宽高，得到中心格式的预测框
+    pred_bbox = torch.cat((pred_bbox_xy, pred_bbox_wh), axis=1)
+    # 将预测框从中心格式转换回角点格式
+    predicted_bbox = d2l.box_center_to_corner(pred_bbox)
+    return predicted_bbox
+
+def nms(boxes, scores, iou_threshold):
+    """非极大值抑制（NMS）：去除重叠的冗余边界框
+    
+    参数:
+        boxes: 所有预测边界框，shape为(N, 4)
+        scores: 每个框的置信度分数，shape为(N,)
+        iou_threshold: IoU阈值，超过此值的框会被抑制
+    返回:
+        keep: 保留的边界框索引列表
+    """
+    # 按置信度从高到低对边界框进行排序，B存储排序后的索引
+    B = torch.argsort(scores, dim=-1, descending=True)
+    # 初始化保留列表，用于存储最终保留的边界框索引
+    keep = []
+    # 循环直到所有框都被处理
+    while B.numel() > 0:
+        # 取出当前置信度最高的框的索引
+        i = B[0]
+        # 将其添加到保留列表
+        keep.append(i)
+        # 如果只剩一个框，结束循环
+        if B.numel() == 1: break
+        # 计算当前框与剩余所有框的IoU
+        iou = box_iou(boxes[i, :].reshape(-1, 4),
+                      boxes[B[1:], :].reshape(-1, 4)).reshape(-1)
+        # 找出IoU小于等于阈值的框的索引（这些框与当前框重叠不大，需要保留）
+        inds = torch.nonzero(iou <= iou_threshold).reshape(-1)
+        # 更新B，只保留IoU小于阈值的框（+1是因为inds相对于B[1:]）
+        B = B[inds + 1]
+    # 返回保留的边界框索引张量
+    return torch.tensor(keep, device=boxes.device)
+
+def multibox_detection(cls_probs, offset_preds, anchors, nms_threshold=0.5,
+                       pos_threshold=0.009999999):
+    """使用非极大值抑制来预测边界框（完整的预测流程）
+    
+    参数:
+        cls_probs: 类别概率，shape为(batch_size, 类别数+1, 锚框数)
+        offset_preds: 预测的偏移量，shape为(batch_size, 锚框数*4)
+        anchors: 锚框，shape为(1, 锚框数, 4)
+        nms_threshold: NMS的IoU阈值
+        pos_threshold: 正类的置信度阈值
+    返回:
+        预测结果，shape为(batch_size, 锚框数, 6)，每行为(类别, 置信度, xmin, ymin, xmax, ymax)
+    """
+    # 获取设备信息和批次大小
+    device, batch_size = cls_probs.device, cls_probs.shape[0]
+    # 去除anchors的batch维度
+    anchors = anchors.squeeze(0)
+    # 获取类别数（不包括背景）和锚框数量
+    num_classes, num_anchors = cls_probs.shape[1], cls_probs.shape[2]
+    # 初始化输出列表
+    out = []
+    # 遍历批次中的每个样本
+    for i in range(batch_size):
+        # 获取第i个样本的类别概率和偏移量预测
+        cls_prob, offset_pred = cls_probs[i], offset_preds[i].reshape(-1, 4)
+        # 对每个锚框，找出最大概率的类别及其置信度
+        # cls_prob[1:]排除背景类
+        conf, class_id = torch.max(cls_prob[1:], 0)
+        # 根据锚框和预测偏移量计算预测的边界框
+        predicted_bb = offset_inverse(anchors, offset_pred)
+        # 使用NMS去除冗余的边界框，返回保留的索引
+        keep = nms(predicted_bb, conf, nms_threshold)
+
+        # 找到所有的non_keep索引，并将类设置为背景
+        # 创建所有锚框的索引
+        all_idx = torch.arange(num_anchors, dtype=torch.long, device=device)
+        # 合并保留索引和所有索引
+        combined = torch.cat((keep, all_idx))
+        # 找出只出现一次的索引（即non_keep）
+        uniques, counts = combined.unique(return_counts=True)
+        non_keep = uniques[counts == 1]
+        # 将keep和non_keep拼接，保持keep在前
+        all_id_sorted = torch.cat((keep, non_keep))
+        # 将non_keep的框标记为背景（类别-1）
+        class_id[non_keep] = -1
+        # 按排序后的索引重新排列类别ID
+        class_id = class_id[all_id_sorted]
+        # 按排序后的索引重新排列置信度和预测框
+        conf, predicted_bb = conf[all_id_sorted], predicted_bb[all_id_sorted]
+        # pos_threshold是一个用于非背景预测的阈值
+        # 找出置信度低于阈值的框
+        below_min_idx = (conf < pos_threshold)
+        # 将这些框标记为背景
+        class_id[below_min_idx] = -1
+        # 将低置信度转换为1-conf（表示是背景的置信度）
+        conf[below_min_idx] = 1 - conf[below_min_idx]
+        # 拼接类别ID、置信度和预测框坐标，形成最终预测信息
+        pred_info = torch.cat((class_id.unsqueeze(1),
+                               conf.unsqueeze(1),
+                               predicted_bb), dim=1)
+        # 添加到输出列表
+        out.append(pred_info)
+    # 堆叠所有样本的结果并返回
+    return torch.stack(out)
+
+# 定义4个锚框用于演示NMS
+anchors = torch.tensor([[0.1, 0.08, 0.52, 0.92],   # 锚框0
+                      [0.08, 0.2, 0.56, 0.95],   # 锚框1
+                      [0.15, 0.3, 0.62, 0.91],   # 锚框2
+                      [0.55, 0.2, 0.9, 0.88]])   # 锚框3
+# 假设模型预测的偏移量都为0（即预测框等于锚框）
+offset_preds = torch.tensor([0] * anchors.numel())
+# 定义类别概率（3个类别：背景、狗、猫）
+cls_probs = torch.tensor([[0] * 4,               # 背景的预测概率（全为0）
+                      [0.9, 0.8, 0.7, 0.1],  # 狗的预测概率
+                      [0.1, 0.2, 0.3, 0.9]]) # 猫的预测概率
+
+# 显示图片
+fig = d2l.plt.imshow(img)
+# 绘制4个锚框及其预测的类别和置信度
+show_bboxes(fig.axes, anchors * bbox_scale,
+            ['dog=0.9',  # 锚框0：预测为狗，置信度0.9
+             'dog=0.8',  # 锚框1：预测为狗，置信度0.8
+             'dog=0.7',  # 锚框2：预测为狗，置信度0.7
+             'cat=0.9']) # 锚框3：预测为猫，置信度0.9
+```
+![mk-3](./src/mk-3.svg)
+```python
+# 调用multibox_detection进行预测
+# unsqueeze(dim=0)为所有输入添加batch维度
+output = multibox_detection(cls_probs.unsqueeze(dim=0),
+                            offset_preds.unsqueeze(dim=0),
+                            anchors.unsqueeze(dim=0),
+                            nms_threshold=0.5)  # NMS的IoU阈值设为0.5
+# 输出结果，每行格式为(类别ID, 置信度, xmin, ymin, xmax, ymax)
+# 类别ID为-1表示背景或被NMS抑制的框
+print(output)
+
+"""
+tensor([[[ 0.00,  0.90,  0.10,  0.08,  0.52,  0.92],
+         [ 1.00,  0.90,  0.55,  0.20,  0.90,  0.88],
+         [-1.00,  0.80,  0.08,  0.20,  0.56,  0.95],
+         [-1.00,  0.70,  0.15,  0.30,  0.62,  0.91]]])
+"""
+
+# 显示图片
+fig = d2l.plt.imshow(img)
+# 遍历第一个样本的所有预测结果
+for i in output[0].detach().numpy():
+    # 如果类别ID为-1（背景），跳过不绘制
+    if i[0] == -1:
+        continue
+    # 构建标签文本：'dog='或'cat=' + 置信度
+    # i[0]为类别索引（0表示狗，1表示猫）
+    label = ('dog=', 'cat=')[int(i[0])] + str(i[1])
+    # 绘制预测框，i[2:]提取坐标(xmin, ymin, xmax, ymax)
+    show_bboxes(fig.axes, [torch.tensor(i[2:]) * bbox_scale], label)
+```
+![mk-4](./src/mk-4.svg)
+
+注：以上代码在2026年已经几乎不常用了，不必深究。
