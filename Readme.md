@@ -81,8 +81,16 @@
       - [残差块](#残差块)
       - [ResNet块细节](#resnet块细节)
       - [代码实现](#代码实现-3)
+    - [DenseNet](#densenet)
+      - [核心理念](#核心理念)
+      - [数学公式](#数学公式-2)
+      - [网络架构](#网络架构)
+        - [Dense Block (密集块)](#dense-block-密集块)
+        - [Transition Layer (过渡层)](#transition-layer-过渡层)
+        - [增长率 (Growth Rate, $k$)](#增长率-growth-rate-k)
+        - [代码实现](#代码实现-4)
   - [多GPU训练](#多gpu训练)
-    - [代码实现](#代码实现-4)
+    - [代码实现](#代码实现-5)
     - [使用pytorch库实现](#使用pytorch库实现)
     - [结果(单GPU)](#结果单gpu)
   - [分布式训练](#分布式训练)
@@ -91,10 +99,10 @@
   - [计算机视觉](#计算机视觉)
     - [数据增强](#数据增强)
       - [常见的图像数据增强方法](#常见的图像数据增强方法)
-      - [代码实现](#代码实现-5)
+      - [代码实现](#代码实现-6)
       - [使用数据增强的训练代码](#使用数据增强的训练代码)
     - [微调（迁移学习）](#微调迁移学习)
-      - [代码实现](#代码实现-6)
+      - [代码实现](#代码实现-7)
     - [物体检测](#物体检测)
       - [绘制框](#绘制框)
       - [数据集](#数据集-1)
@@ -2181,6 +2189,223 @@ loss 0.148, train acc 0.950, test acc 0.855
 ```
 
 ![ResNet](./src/ResNet.svg)
+
+### DenseNet
+
+DenseNet 的核心思想是对卷积神经网络中信息的流动方式进行了彻底的重新思考。
+
+#### 核心理念
+
+极致的连接 (Dense Connectivity)
+
+在 DenseNet 出现之前，主流的卷积神经网络（如 VGG, ResNet）主要通过层与层之间的串联来传递信息。
+
+* 传统 CNN: 第 $L$ 层只接收第 $L-1$ 层的输出。
+* ResNet (残差网络): 通过恒等映射（Identity Shortcut），将输入与输出相加 (Add)。公式为：$x_l = H_l(x_{l-1}) + x_{l-1}$。
+
+DenseNet 的创新点：DenseNet 提出了一种密集连接机制。在一个被称为 "Dense Block" 的模块内，每一层都与所有之前的层直接相连。这意味着，第 $l$ 层接收前面所有层 ($0, 1, ..., l-1$) 的特征图（Feature Maps）作为输入。
+
+#### 数学公式
+
+$$x_l = H_l([x_0, x_1, ..., x_{l-1}])$$
+
+其中：
+
+* $[x_0, x_1, ..., x_{l-1}]$ 表示将之前所有层的特征图在通道维度 (Channel axis) 上进行拼接 (Concatenation)。
+* $H_l$ 是一个非线性变换函数（通常包含 BN + ReLU + Conv）。
+
+#### 网络架构
+
+DenseNet 主要由两个核心模块组成：Dense Block 和 Transition Layer。
+
+整体架构如下：
+
+![densenet-1](./src/denseNet-1.svg)
+
+Dense Block 内部细节:
+
+![denseNet-2](./src/denseNet-2.svg)
+
+##### Dense Block (密集块)
+
+这是网络的核心组件。在一个 Block 内部，特征图的尺寸（长和宽）保持不变，以便于进行通道拼接（Concatenation）。
+
+* 特征重用 (Feature Reuse): 由于每一层都能“看到”之前所有的特征，网络可以更高效地利用低级特征，而不需要重复学习。
+* 瓶颈层 (Bottleneck Layers): 为了减少计算量，DenseNet 通常在 $3\times3$ 卷积之前引入一个 $1\times1$ 卷积（称为 DenseNet-B）。结构通常是：`BN -> ReLU -> Conv(1x1) -> BN -> ReLU -> Conv(3x3)`。
+
+##### Transition Layer (过渡层)
+
+由于 CNN 需要不断缩小特征图的尺寸（Downsampling）来提取高层语义，而 Dense Block 内部保持尺寸不变，因此需要 Transition Layer 连接两个 Dense Block。
+
+* 作用： 降低特征图的尺寸（Downsampling）和压缩通道数。
+* 结构： 通常包含 `BN -> ReLU -> Conv(1x1) -> Average Pooling(2x2)`。
+* 压缩系数 (Compression, $\theta$): 为了进一步减少参数，Transition Layer 会通过 $1\times1$ 卷积减少通道数。如果输入通道是 $m$，输出通道通常是 $\lfloor \theta m \rfloor$，其中 $0 < \theta \le 1$。
+
+##### 增长率 (Growth Rate, $k$)
+
+这是 DenseNet 特有的一个超参数。
+
+* 如果每一层 $H_l$ 产生 $k$ 个特征图（feature maps），那么第 $l$ 层的输入通道数就是 $k_0 + k \times (l-1)$（$k_0$ 是输入层的通道数）。
+* DenseNet 的一个显著特点是 $k$ 可以取得很小（例如 $k=12$ 或 $k=32$）。这被称为“窄层”（Narrow Layers）。因为网络通过拼接保留了全局状态，每一层只需要学习很少的新特征即可。
+
+##### 代码实现
+
+```python
+import torch
+from torch import nn
+from d2l import torch as d2l
+
+def conv_block(input_channels, num_channels):
+    """
+    卷积块函数：DenseNet的基本构建单元
+    参数:
+        input_channels: 输入通道数
+        num_channels: 输出通道数
+    返回:
+        一个包含批量归一化、激活函数和卷积层的序列模块
+    """
+    return nn.Sequential(
+        nn.BatchNorm2d(input_channels),  # 批量归一化层，对输入进行标准化，加速训练并提高稳定性
+        nn.ReLU(),  # ReLU激活函数，引入非线性，将负值变为0
+        nn.Conv2d(input_channels, num_channels, kernel_size=3, padding=1))  # 3x3卷积层，padding=1保持特征图尺寸不变
+
+class DenseBlock(nn.Module):
+    """
+    稠密块（Dense Block）：DenseNet的核心组件
+    每一层的输入都是前面所有层输出的拼接，实现特征重用
+    """
+    def __init__(self, num_convs, input_channels, num_channels):
+        """
+        初始化稠密块
+        参数:
+            num_convs: 该稠密块中卷积层的数量
+            input_channels: 输入通道数
+            num_channels: 增长率，每个卷积块新增的通道数
+        """
+        super(DenseBlock, self).__init__()  # 调用父类的初始化方法
+        layer = []  # 创建空列表，用于存储所有卷积块
+        for i in range(num_convs):  # 循环创建num_convs个卷积块
+            # 计算当前卷积块的输入通道数：原始输入 + 前面i个块的输出
+            # 每个块输出num_channels个通道，所以前i个块共输出 i * num_channels 个通道
+            layer.append(conv_block(
+                num_channels * i + input_channels, num_channels))
+        self.net = nn.Sequential(*layer)  # 将所有卷积块组合成一个序列模块
+
+    def forward(self, X):
+        """
+        前向传播函数
+        参数:
+            X: 输入张量
+        返回:
+            拼接了所有层输出的张量
+        """
+        for blk in self.net:  # 遍历稠密块中的每个卷积块
+            Y = blk(X)  # 将当前输入X通过卷积块得到输出Y
+            # 在通道维度（dim=1）上将输入X和输出Y拼接
+            # 这是DenseNet的关键：每层的输入包含前面所有层的特征
+            X = torch.cat((X, Y), dim=1)
+        return X  # 返回最终拼接的特征图
+
+# 测试稠密块的输出形状
+blk = DenseBlock(2, 3, 10)  # 创建一个稠密块：2个卷积层，3个输入通道，增长率为10
+X = torch.randn(4, 3, 8, 8)  # 创建随机输入张量：批量大小4，3个通道，8x8的特征图
+Y = blk(X)  # 通过稠密块进行前向传播
+# 输出形状应该是 (4, 3+2*10, 8, 8) = (4, 23, 8, 8)
+# 因为输入3个通道 + 第1层输出10个通道 + 第2层输出10个通道 = 23个通道
+print(Y.shape)  # 打印输出张量的形状
+# torch.Size([4, 23, 8, 8])
+
+def transition_block(input_channels, num_channels):
+    """
+    过渡层（Transition Layer）：连接两个稠密块
+    作用：减少通道数和特征图尺寸，控制模型复杂度
+    参数:
+        input_channels: 输入通道数
+        num_channels: 输出通道数（通常是输入通道数的一半）
+    返回:
+        包含批量归一化、激活、1x1卷积和平均池化的序列模块
+    """
+    return nn.Sequential(
+        nn.BatchNorm2d(input_channels),  # 批量归一化
+        nn.ReLU(),  # ReLU激活函数
+        nn.Conv2d(input_channels, num_channels, kernel_size=1),  # 1x1卷积降低通道数
+        nn.AvgPool2d(kernel_size=2, stride=2))  # 2x2平均池化，将特征图尺寸减半
+
+# 测试过渡层的输出形状
+blk = transition_block(23, 10)  # 创建过渡层：23个输入通道，10个输出通道
+# Y的形状是 (4, 23, 8, 8)，经过过渡层后：
+# 1x1卷积将通道数从23降到10
+# 2x2平均池化将特征图从8x8降到4x4
+# 最终输出形状应该是 (4, 10, 4, 4)
+print(blk(Y).shape)  # 打印输出张量的形状
+# torch.Size([4, 10, 4, 4])
+
+# 构建DenseNet的第一个模块（类似于ResNet的stem）
+b1 = nn.Sequential(
+    # 7x7大卷积核，步幅为2，padding为3，将1通道(灰度图)转换为64通道
+    # 特征图尺寸减半 (96x96 -> 48x48)
+    nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3),
+    nn.BatchNorm2d(64),  # 对64个通道进行批量归一化
+    nn.ReLU(),  # ReLU激活函数
+    # 3x3最大池化，步幅为2，padding为1
+    # 特征图尺寸再次减半 (48x48 -> 24x24)
+    nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
+
+# 构建DenseNet的主体部分：多个稠密块和过渡层
+num_channels, growth_rate = 64, 32  # 初始通道数64，增长率32（每个卷积块新增32个通道）
+num_convs_in_dense_blocks = [4, 4, 4, 4]  # 定义4个稠密块，每个块包含4个卷积层
+blks = []  # 创建空列表，用于存储所有的稠密块和过渡层
+
+for i, num_convs in enumerate(num_convs_in_dense_blocks):  # 遍历每个稠密块
+    # 添加一个稠密块
+    # num_convs: 当前块中的卷积层数量
+    # num_channels: 当前块的输入通道数
+    # growth_rate: 每层新增的通道数
+    blks.append(DenseBlock(num_convs, num_channels, growth_rate))
+    
+    # 计算稠密块的输出通道数
+    # 输出通道数 = 输入通道数 + 卷积层数 × 增长率
+    num_channels += num_convs * growth_rate
+    
+    # 在稠密块之间添加过渡层（最后一个稠密块后不需要过渡层）
+    if i != len(num_convs_in_dense_blocks) - 1:
+        # 过渡层将通道数减半，控制模型复杂度
+        blks.append(transition_block(num_channels, num_channels // 2))
+        num_channels = num_channels // 2  # 更新通道数为减半后的值
+
+# 构建完整的DenseNet网络
+net = nn.Sequential(
+    b1,  # 第一个模块：包含大卷积和最大池化
+    *blks,  # 使用*解包，将列表中所有的稠密块和过渡层依次添加
+    nn.BatchNorm2d(num_channels),  # 最后一个稠密块后的批量归一化
+    nn.ReLU(),  # ReLU激活函数
+    nn.AdaptiveAvgPool2d((1, 1)),  # 自适应平均池化，将任意大小的特征图变为1x1
+    nn.Flatten(),  # 展平层，将多维张量压缩为一维向量
+    nn.Linear(num_channels, 10))  # 全连接层，输出10个类别的分数（对应Fashion-MNIST的10个类别）
+
+# 设置训练参数并开始训练
+lr, num_epochs, batch_size = 0.1, 10, 256  # 学习率0.1，训练10个epoch，批量大小256
+# 加载Fashion-MNIST数据集，resize=96将图像调整为96x96
+train_iter, test_iter = d2l.load_data_fashion_mnist(batch_size, resize=96)
+# 使用d2l提供的训练函数训练模型
+# net: 网络模型
+# train_iter: 训练数据迭代器
+# test_iter: 测试数据迭代器
+# num_epochs: 训练轮数
+# lr: 学习率
+# d2l.try_gpu(): 如果有GPU则使用GPU，否则使用CPU
+d2l.train_ch6(net, train_iter, test_iter, num_epochs, lr, d2l.try_gpu())
+```
+
+结果如下：
+
+```python
+loss 0.140, train acc 0.949, test acc 0.896
+578373.9 examples/sec on cuda:0
+Best test acc: 0.896
+```
+
+![densenet](./src/densenet.png)
 
 ## 多GPU训练
 
