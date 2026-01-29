@@ -89,6 +89,10 @@
         - [Transition Layer (过渡层)](#transition-layer-过渡层)
         - [增长率 (Growth Rate, $k$)](#增长率-growth-rate-k)
         - [代码实现](#代码实现-4)
+    - [DarkNet-53(yoloV3)](#darknet-53yolov3)
+      - [核心设计理念](#核心设计理念)
+      - [Darknet-53 的具体结构层级](#darknet-53-的具体结构层级)
+      - [关键组件](#关键组件)
   - [多GPU训练](#多gpu训练)
     - [代码实现](#代码实现-5)
     - [使用pytorch库实现](#使用pytorch库实现)
@@ -2406,6 +2410,41 @@ Best test acc: 0.896
 ```
 
 ![densenet](./src/densenet.png)
+
+### DarkNet-53(yoloV3)
+
+在 YOLOv3（You Only Look Once version 3）中，最为核心的改进之一就是引入了全新的特征提取网络（Backbone），命名为 Darknet-53。
+
+#### 核心设计理念
+
+Darknet-53 的设计主要基于以下三个关键点：
+
+1. 全卷积网络 (Fully Convolutional): 网络中没有使用全连接层（FC），这使得网络可以接受任意尺寸的输入图片。
+2. 残差结构 (Residual Blocks): 借鉴了 ResNet 的思想，引入了 Shortcut Connection（跳跃连接）。这解决了深层网络中的梯度消失问题，使得网络可以构建得更深（从 19 层增加到 53 层）。
+3. 步长卷积代替池化 (Stride Convolution vs Pooling): 取消了所有的 Max Pooling 池化层，通过卷积层的 `stride=2` 来实现下采样（Downsampling）。这样做的好处是能够更有效地保留图像的细微特征信息。
+
+#### Darknet-53 的具体结构层级
+
+之所以称为 Darknet-53，是因为它包含了 53 个卷积层（52 个卷积层在特征提取部分 + 1 个全连接层用于分类任务，但在 YOLOv3 检测任务中通常去掉全连接层）。
+
+我们可以将网络分为 5 个主要的尺度阶段（Stages），每个阶段通过步长为 2 的卷积层进行下采样。具体如下图所示：
+
+![DarkNet](./src/DarkNet.svg)
+
+#### 关键组件
+
+1. DBL 组件 (Darknet Conv2D_BN_Leaky)
+   Darknet-53 中的最小卷积单元不仅仅是一个卷积操作，它通常包含三个部分，在代码中常被称为 DBL 或 CBL：
+   1. Conv2d: 卷积层。
+   2. Batch Normalization (BN): 批归一化，用于加速收敛并防止过拟合。
+   3. Leaky ReLU: 激活函数。与普通 ReLU 不同，它在负数区域给出一个很小的斜率（通常是 0.1），防止神经元“死亡”。
+2. 残差模块 (Residual Unit)
+   这是 Darknet-53 能够加深网络的关键。一个残差模块包含：
+   1. $1 \times 1$ 卷积： 用于压缩通道数（降维），减少参数量和计算量。
+   2. $3 \times 3$ 卷积： 用于特征提取和恢复通道数。
+   3. Add 操作： 将模块的输入直接加到 $3 \times 3$ 卷积的输出上（Element-wise addition）。
+   结构如下:
+   $$Input \rightarrow [1 \times 1 \text{ Conv}] \rightarrow [3 \times 3 \text{ Conv}] \rightarrow \text{Add}(Input) \rightarrow Output$$
 
 ## 多GPU训练
 
