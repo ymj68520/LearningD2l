@@ -121,6 +121,7 @@
         - [核心思想：单次检测 (Single Shot)](#核心思想单次检测-single-shot)
         - [两个技术创新](#两个技术创新)
         - [SSD 算法完整执行流程](#ssd-算法完整执行流程)
+        - [代码实现(简化后仍复杂)](#代码实现简化后仍复杂)
       - [YOLO(You Only Look Once)](#yoloyou-only-look-once)
         - [工作原理](#工作原理)
         - [版本](#版本)
@@ -4294,6 +4295,23 @@ SSD算法主要为了继续加速。SSD 的核心精髓在于：“一步到位�
    由于生成了近九千个预测框，会有大量冗余的框重叠在同一个物体上：
    * 置信度过滤： 首先剔除分类得分过低（如低于 0.5）的框。
    * 非极大值抑制 (NMS)： 核心步骤。对于重叠度（IoU）较高的框，只保留得分最高的那一个，删掉其余重复的框。
+
+##### 代码实现(简化后仍复杂)
+
+具体内容请看`ch6-cv/目标识别-SSD.ipynb`
+
+在colab使用A100训练预测结果如下：
+
+```python
+class err 3.20e-03, bbox mae 3.06e-03
+8872.3 examples/sec on cuda:0
+```
+
+![ssd](./src/ssd.jpeg)
+
+对于图片`banana.jpg`的预测结果如下：
+
+![ssd-pre](./src/ssd-pre.jpeg)
 
 #### YOLO(You Only Look Once)
 
