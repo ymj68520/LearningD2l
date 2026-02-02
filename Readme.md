@@ -126,6 +126,10 @@
         - [工作原理](#工作原理)
         - [版本](#版本)
         - [V3结构](#v3结构)
+    - [语义分割](#语义分割)
+      - [数据集](#数据集-2)
+      - [转置卷积](#转置卷积)
+      - [全连接卷积神经网络(FCN)](#全连接卷积神经网络fcn)
 
 ## 安装
 
@@ -4341,4 +4345,1116 @@ YOLO 将输入的图像划分为 $S \times S$ 个网格（Grid Cell）。如果�
 
 ![yolov3](./src/yolov3.svg)
 
+### 语义分割
 
+分辨图片中的多个物体，分类像素归属于不同的目标。
+
+#### 数据集
+
+首先引入包：
+
+```python
+%matplotlib inline
+import os
+import torch
+import torchvision
+from d2l import torch as d2l
+```
+
+下载数据集, 大小约2G：
+
+```python
+# ==================== 下载VOC2012语义分割数据集 ====================
+# VOC2012是计算机视觉领域常用的语义分割数据集，大小约2GB
+# 语义分割：将图像中的每个像素都分类到特定类别（如人、车、猫等）
+
+# 在d2l的数据集Hub中注册VOC2012数据集的下载链接和校验码
+d2l.DATA_HUB['voc2012'] = (d2l.DATA_URL + 'VOCtrainval_11-May-2012.tar',
+                           '4e443f8a2eca6b1dac8a6c57641b67dd40621a49')
+
+# 下载并解压数据集到指定目录，返回数据集的路径
+# voc_dir 将包含数据集的根目录路径
+voc_dir = d2l.download_extract('voc2012', 'VOCdevkit/VOC2012')
+```
+
+定义读取数据集函数，基于voc数据集的特殊格式：
+
+```python
+# ==================== 读取VOC数据集的图像和标注 ====================
+def read_voc_images(voc_dir, is_train=True):
+    """
+    读取所有VOC图像及其对应的语义分割标注
+    
+    参数:
+        voc_dir: VOC数据集的根目录路径
+        is_train: 布尔值，True读取训练集，False读取验证集
+    
+    返回:
+        features: 原始RGB图像列表
+        labels: 对应的语义分割标注图像列表（每个像素用不同颜色表示不同类别）
+    """
+    # 根据is_train参数确定读取train.txt还是val.txt
+    # 这些txt文件包含了图像文件名列表
+    txt_fname = os.path.join(voc_dir, 'ImageSets', 'Segmentation',
+                             'train.txt' if is_train else 'val.txt')
+    
+    # 设置读取模式为RGB彩色图像
+    mode = torchvision.io.image.ImageReadMode.RGB
+    
+    # 打开txt文件并读取所有图像文件名
+    with open(txt_fname, 'r') as f:
+        images = f.read().split()  # 将文件内容按空白字符分割成列表
+    
+    # 初始化特征(原图)和标签(分割标注)列表
+    features, labels = [], []
+    
+    # 遍历所有图像文件名
+    for i, fname in enumerate(images):
+        # 读取原始RGB图像（JPEGImages目录下的.jpg文件）
+        features.append(torchvision.io.read_image(os.path.join(
+            voc_dir, 'JPEGImages', f'{fname}.jpg')))
+        
+        # 读取对应的语义分割标注图像（SegmentationClass目录下的.png文件）
+        # 标注图像中，不同颜色代表不同的物体类别
+        labels.append(torchvision.io.read_image(os.path.join(
+            voc_dir, 'SegmentationClass' ,f'{fname}.png'), mode))
+    
+    return features, labels
+
+# 读取训练集的图像和标注
+train_features, train_labels = read_voc_images(voc_dir, True)
+```
+
+显示5张图片看看效果：
+
+```python
+# ==================== 可视化原始图像和标注 ====================
+# 显示前5张图像及其对应的分割标注
+
+n = 5  # 要显示的图像数量
+
+# 将原始图像和标注图像合并到一个列表中
+# train_features[0:n] 是前5张原始图像
+# train_labels[0:n] 是前5张标注图像
+imgs = train_features[0:n] + train_labels[0:n]
+
+# 调整图像张量的维度顺序
+# 从 (C, H, W) 转换为 (H, W, C)，因为显示函数需要这种格式
+# C=通道数(RGB=3), H=高度, W=宽度
+imgs = [img.permute(1, 2, 0) for img in imgs]
+
+# 显示图像：2行，每行n张
+# 第一行显示原始图像，第二行显示对应的分割标注
+d2l.show_images(imgs, 2, n)
+```
+
+![yyfg-data1](./src/yyfg-data1.png)
+
+手动定义标注的颜色和标签的关系：
+
+```python
+# ==================== 定义VOC数据集的类别和颜色映射 ====================
+
+# VOC_COLORMAP: RGB颜色映射表，每种颜色对应一个物体类别
+# 例如：[0, 0, 0]是黑色代表背景，[128, 0, 0]是深红色代表飞机
+# 这些颜色在标注图像中用来区分不同的物体类别
+VOC_COLORMAP = [[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
+                [0, 0, 128], [128, 0, 128], [0, 128, 128], [128, 128, 128],
+                [64, 0, 0], [192, 0, 0], [64, 128, 0], [192, 128, 0],
+                [64, 0, 128], [192, 0, 128], [64, 128, 128], [192, 128, 128],
+                [0, 64, 0], [128, 64, 0], [0, 192, 0], [128, 192, 0],
+                [0, 64, 128]]
+
+# VOC_CLASSES: 21个类别的名称，与上面的颜色一一对应
+# 索引0是背景，索引1是飞机，索引2是自行车，等等
+VOC_CLASSES = ['background', 'aeroplane', 'bicycle', 'bird', 'boat',
+               'bottle', 'bus', 'car', 'cat', 'chair', 'cow',
+               'diningtable', 'dog', 'horse', 'motorbike', 'person',
+               'potted plant', 'sheep', 'sofa', 'train', 'tv/monitor']
+```
+
+构建两个互相转换的函数：
+
+```python
+# ==================== 构建颜色到类别索引的映射 ====================
+
+def voc_colormap2label():
+    """
+    构建从RGB颜色值到类别索引的映射
+    
+    为什么需要这个映射？
+    - 标注图像中每个像素都是RGB颜色值（如[128, 0, 0]）
+    - 但神经网络需要的是类别索引（如0, 1, 2...）
+    - 这个函数创建一个查找表，快速将RGB转换为类别索引
+    
+    返回:
+        colormap2label: 一维张量，长度为256^3（所有可能的RGB组合）
+                       索引是RGB值的整数表示，值是对应的类别索引
+    """
+    # 创建一个大小为256^3的零张量（可以表示所有RGB组合）
+    colormap2label = torch.zeros(256**3, dtype=torch.long)
+    
+    # 遍历所有预定义的颜色
+    for i, colormap in enumerate(VOC_COLORMAP):
+        # 将RGB三通道值转换为一个唯一的整数索引
+        # 公式: (R * 256 + G) * 256 + B
+        # 例如：[128, 0, 0] -> (128*256 + 0)*256 + 0 = 8388608
+        colormap2label[(colormap[0] * 256 + colormap[1]) * 256 + colormap[2]] = i
+    
+    return colormap2label
+
+
+def voc_label_indices(colormap, colormap2label):
+    """
+    将VOC标注图像中的RGB颜色值转换为类别索引
+    
+    参数:
+        colormap: 标注图像张量，形状为 (3, H, W)
+        colormap2label: RGB到类别索引的映射表
+    
+    返回:
+        类别索引张量，形状为 (H, W)，每个元素是0-20之间的类别索引
+    """
+    # 将张量从 (C, H, W) 转换为 (H, W, C)，并转换为numpy数组
+    colormap = colormap.permute(1, 2, 0).numpy().astype('int32')
+    
+    # 将每个像素的RGB值转换为单一整数索引
+    # 对于图像中的每个像素，计算其RGB对应的整数值
+    idx = ((colormap[:, :, 0] * 256 + colormap[:, :, 1]) * 256
+           + colormap[:, :, 2])
+    
+    # 使用映射表将整数索引转换为类别索引
+    return colormap2label[idx]
+```
+
+看看转换效果：
+
+```python
+# ==================== 测试颜色到类别索引的转换 ====================
+# 将第一张标注图像转换为类别索引矩阵
+y = voc_label_indices(train_labels[0], voc_colormap2label())
+
+# 打印图像中一小块区域(10x15像素)的类别索引
+# 这样可以看到某个区域内各像素的类别编号
+print(y[105:115, 125:140])  # 显示从第105-114行，第125-139列的类别索引
+
+# 打印索引1对应的类别名称（应该是'aeroplane'飞机）
+print(VOC_CLASSES[1])
+```
+
+```plantext
+tensor([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]])
+aeroplane
+```
+
+定义图像数据增强，并显示效果：
+
+```python
+# ==================== 随机裁剪数据增强 ====================
+
+def voc_rand_crop(feature, label, height, width):
+    """
+    对图像和标注进行相同位置的随机裁剪
+    
+    为什么需要随机裁剪？
+    1. 数据增强：增加训练样本的多样性
+    2. 统一尺寸：神经网络需要固定大小的输入
+    3. 重要：图像和标注必须裁剪相同位置，保证对应关系
+    
+    参数:
+        feature: 原始图像
+        label: 标注图像
+        height, width: 裁剪后的目标高度和宽度
+    
+    返回:
+        裁剪后的图像和标注
+    """
+    # 随机获取裁剪区域的参数（左上角坐标、高度、宽度）
+    rect = torchvision.transforms.RandomCrop.get_params(
+        feature, (height, width))
+    
+    # 对原始图像进行裁剪
+    feature = torchvision.transforms.functional.crop(feature, *rect)
+    
+    # 对标注图像进行相同位置的裁剪（确保像素级对应）
+    label = torchvision.transforms.functional.crop(label, *rect)
+    
+    return feature, label
+
+
+# ==================== 可视化随机裁剪效果 ====================
+imgs = []
+
+# 对同一张图像进行n次随机裁剪，展示数据增强的效果
+for _ in range(n):
+    # 每次裁剪得到一对(图像, 标注)
+    imgs += voc_rand_crop(
+        train_features[0], train_labels[0], 200, 300)
+
+# 调整维度以便显示
+imgs = [img.permute(1, 2, 0) for img in imgs]
+
+# 显示裁剪结果：第一行显示n个裁剪后的图像，第二行显示对应的标注
+# imgs[::2] 是所有偶数索引（原始图像）
+# imgs[1::2] 是所有奇数索引（标注图像）
+d2l.show_images(imgs[::2] + imgs[1::2], 2, n)
+```
+
+![yyfg-data2](./src/yyfg-data2.png)
+
+构建数据集类：
+
+```python
+# ==================== 自定义VOC数据集类 ====================
+
+class VOCSegDataset(torch.utils.data.Dataset):
+    """
+    用于加载VOC语义分割数据集的自定义Dataset类
+    
+    这个类封装了数据加载、预处理的全部流程：
+    1. 读取图像
+    2. 过滤太小的图像
+    3. 归一化图像
+    4. 在训练时随机裁剪
+    """
+
+    def __init__(self, is_train, crop_size, voc_dir):
+        """
+        初始化数据集
+        
+        参数:
+            is_train: 是否为训练集
+            crop_size: 裁剪尺寸(height, width)
+            voc_dir: VOC数据集目录
+        """
+        # 图像归一化：使用ImageNet的均值和标准差
+        # 这是计算机视觉中的常见做法，有助于模型收敛
+        # mean: 每个通道(RGB)的均值
+        # std: 每个通道的标准差
+        self.transform = torchvision.transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        
+        self.crop_size = crop_size
+        
+        # 读取所有图像和标注
+        features, labels = read_voc_images(voc_dir, is_train=is_train)
+        
+        # 过滤掉尺寸小于crop_size的图像，然后归一化
+        # self.filter() 只保留足够大的图像
+        # self.normalize_image() 对每张图像进行归一化
+        self.features = [self.normalize_image(feature)
+                         for feature in self.filter(features)]
+        
+        # 同样过滤标注图像
+        self.labels = self.filter(labels)
+        
+        # 创建颜色到类别索引的映射表
+        self.colormap2label = voc_colormap2label()
+        
+        # 打印读取的样本数量
+        print('read ' + str(len(self.features)) + ' examples')
+
+    def normalize_image(self, img):
+        """
+        归一化图像
+        
+        步骤:
+        1. 将像素值从[0, 255]缩放到[0, 1]
+        2. 使用ImageNet的均值和标准差进行标准化
+        """
+        return self.transform(img.float() / 255)
+
+    def filter(self, imgs):
+        """
+        过滤掉太小的图像
+        
+        只保留高度>=crop_size[0] 且 宽度>=crop_size[1] 的图像
+        因为太小的图像无法裁剪出所需尺寸
+        """
+        return [img for img in imgs if (
+            img.shape[1] >= self.crop_size[0] and
+            img.shape[2] >= self.crop_size[1])]
+
+    def __getitem__(self, idx):
+        """
+        获取第idx个样本
+        
+        这是Dataset类必须实现的方法
+        每次DataLoader取数据时都会调用这个方法
+        
+        返回:
+            feature: 裁剪并归一化后的图像
+            label: 对应的类别索引标注（已转换为类别索引）
+        """
+        # 随机裁剪图像和标注到指定尺寸
+        feature, label = voc_rand_crop(self.features[idx], self.labels[idx],
+                                       *self.crop_size)
+        
+        # 将标注从RGB颜色转换为类别索引
+        return (feature, voc_label_indices(label, self.colormap2label))
+
+    def __len__(self):
+        """
+        返回数据集的大小
+        
+        这是Dataset类必须实现的方法
+        """
+        return len(self.features)
+```
+
+定义一些训练参数：
+
+```python
+# ==================== 创建训练集和测试集 ====================
+
+# 设置裁剪尺寸：高度320像素，宽度480像素
+crop_size = (320, 480)
+
+# 创建训练集数据集对象
+voc_train = VOCSegDataset(True, crop_size, voc_dir)
+
+# 创建测试集（验证集）数据集对象
+voc_test = VOCSegDataset(False, crop_size, voc_dir)
+
+# ==================== 创建数据加载器并测试 ====================
+
+# 设置批次大小：每次训练使用64个样本
+batch_size = 64
+
+# 创建数据加载器（DataLoader）
+# DataLoader的作用：
+# 1. 自动分批次加载数据
+# 2. 支持多进程加载，提高效率
+# 3. 支持数据打乱（shuffle）
+train_iter = torch.utils.data.DataLoader(
+    voc_train,                                    # 数据集对象
+    batch_size,                                   # 批次大小
+    shuffle=True,                                 # 打乱数据顺序（训练时很重要）
+    drop_last=True,                               # 丢弃最后不足一个batch的数据
+    num_workers=d2l.get_dataloader_workers())     # 多进程加载数据的进程数
+
+# 测试数据加载器：获取一个批次的数据并查看形状
+for X, Y in train_iter:
+    print(X.shape)  # 图像形状: (batch_size, 3, 320, 480)
+                     # 3是RGB三通道
+    print(Y.shape)  # 标注形状: (batch_size, 320, 480)
+                     # 每个元素是0-20之间的类别索引
+    break            # 只看第一个批次
+```
+
+封装上述函数：
+
+```python
+# ==================== 封装数据加载函数 ====================
+
+def load_data_voc(batch_size, crop_size):
+    """
+    加载VOC语义分割数据集的便捷函数
+    
+    这个函数封装了整个数据加载流程，便于在其他地方调用
+    
+    参数:
+        batch_size: 批次大小
+        crop_size: 裁剪尺寸(height, width)
+    
+    返回:
+        train_iter: 训练集数据迭代器
+        test_iter: 测试集数据迭代器
+    """
+    # 下载并获取VOC数据集路径
+    voc_dir = d2l.download_extract('voc2012', os.path.join(
+        'VOCdevkit', 'VOC2012'))
+    
+    # 获取合适的worker数量（用于多进程数据加载）
+    num_workers = d2l.get_dataloader_workers()
+    
+    # 创建训练集数据加载器
+    train_iter = torch.utils.data.DataLoader(
+        VOCSegDataset(True, crop_size, voc_dir),  # 训练集
+        batch_size,
+        shuffle=True,                              # 训练时打乱数据
+        drop_last=True,                            # 丢弃不完整的批次
+        num_workers=num_workers)
+    
+    # 创建测试集数据加载器
+    test_iter = torch.utils.data.DataLoader(
+        VOCSegDataset(False, crop_size, voc_dir), # 测试集
+        batch_size,
+        drop_last=True,                            # 丢弃不完整的批次
+        num_workers=num_workers)                   # 测试时不需要打乱
+    
+    return train_iter, test_iter
+```
+
+#### 转置卷积
+
+在卷积神经网络（CNN）的前向传播中，普通的卷积操作通常会降低图像的分辨率（下采样），以提取高层抽象特征。而语义分割要求输出与输入图像尺寸相同的分割掩码（Mask），这就需要上采样（Upsampling）。
+
+转置卷积是一种具有可学习参数的上采样方式。与双线性插值等固定算法不同，转置卷积可以通过反向传播来优化权重，从而学习如何最有效地还原空间细节。
+
+从矩阵乘法的角度来看，普通卷积可以表示为 $\mathbf{y} = \mathbf{C}\mathbf{x}$，其中 $\mathbf{C}$ 是一个稀疏的卷积矩阵。转置卷积的操作则可以看作是 $\mathbf{z} = \mathbf{C}^T\mathbf{y}$。
+
+运作过程（以 Stride=1 为例）：（具体看书）
+
+1. 输入扩大：在输入特征图的像素之间填充（Padding）一定的空位（如果是 Stride > 1，则在像素间插入红点/0）。
+2. 卷积运算：使用一个标准的卷积核在扩大后的输入上进行滑动卷积。
+3. 输出结果：通过调整卷积核大小、步长（Stride）和填充（Padding），可以将输入特征图“放大”到预期的尺寸。
+
+虽然过程类似于反向的卷积，但不是逆运算，注意，卷积不可逆！
+
+转置卷积的填充不会增大输出，而会减小输出。
+
+一些细节看代码：
+
+```python
+# ==================== 导入必要的库 ====================
+# torch: PyTorch深度学习框架
+import torch
+
+# nn: PyTorch的神经网络模块，包含各种层和损失函数
+from torch import nn
+
+# d2l: Dive into Deep Learning工具库
+from d2l import torch as d2l
+
+# ==================== 转置卷积的基础实现 ====================
+
+def trans_conv(X, K):
+    """
+    转置卷积（反卷积）的基础实现
+    
+    什么是转置卷积？
+    - 转置卷积是卷积的逆运算，用于上采样（增大特征图尺寸）
+    - 在语义分割中，需要将小的特征图放大到原图大小
+    - 转置卷积通过在输入间插入零值，然后进行卷积来实现放大
+    
+    工作原理：
+    - 对输入X的每个元素，与卷积核K相乘
+    - 将结果放置在输出的对应位置
+    - 有重叠的地方进行累加
+    
+    参数:
+        X: 输入特征图，形状为 (height, width)
+        K: 卷积核，形状为 (kernel_h, kernel_w)
+    
+    返回:
+        Y: 输出特征图，形状为 (height+kernel_h-1, width+kernel_w-1)
+    
+    举例：如果输入是2x2，卷积核是2x2，输出将是3x3
+    """
+    h, w = K.shape  # 获取卷积核的高度和宽度
+    
+    # 创建输出张量，尺寸比输入大
+    # 输出的高度 = 输入高度 + 卷积核高度 - 1
+    # 输出的宽度 = 输入宽度 + 卷积核宽度 - 1
+    Y = torch.zeros((X.shape[0] + h - 1, X.shape[1] + w - 1))
+    
+    # 遍历输入的每个元素
+    for i in range(X.shape[0]):
+        for j in range(X.shape[1]):
+            # 将输入元素X[i,j]与整个卷积核相乘
+            # 然后将结果加到输出Y的对应区域
+            # 这就是为什么叫"转置"卷积：输入的每个值影响输出的一个区域
+            Y[i: i + h, j: j + w] += X[i, j] * K
+    
+    return Y
+
+# ==================== 测试转置卷积 ====================
+
+# 创建一个2x2的输入矩阵
+X = torch.tensor([[0.0, 1.0], [2.0, 3.0]])
+
+# 创建一个2x2的卷积核
+K = torch.tensor([[0.0, 1.0], [2.0, 3.0]])
+
+# 执行转置卷积
+# 输入是2x2，卷积核是2x2，输出将是3x3
+# 观察输出如何从小的特征图生成大的特征图
+trans_conv(X, K)
+"""
+tensor([[ 0.,  0.,  1.],
+        [ 0.,  4.,  6.],
+        [ 4., 12.,  9.]])
+"""
+
+# ==================== 使用PyTorch内置的转置卷积层 ====================
+
+# 将输入和卷积核reshape为4D张量
+# PyTorch的卷积层需要4D输入：(batch_size, channels, height, width)
+# reshape(1, 1, 2, 2) 表示：1个样本，1个通道，2x2的特征图
+X, K = X.reshape(1, 1, 2, 2), K.reshape(1, 1, 2, 2)
+
+# 创建转置卷积层
+# 参数说明：
+#   1: 输入通道数
+#   1: 输出通道数
+#   kernel_size=2: 卷积核大小为2x2
+#   bias=False: 不使用偏置项
+tconv = nn.ConvTranspose2d(1, 1, kernel_size=2, bias=False)
+
+# 将我们自定义的卷积核赋值给层的权重
+# 这样可以验证PyTorch的实现与我们的手动实现是否一致
+tconv.weight.data = K
+
+# 执行转置卷积
+# 输出应该与我们手动实现的trans_conv(X, K)结果相同
+tconv(X)
+"""
+tensor([[[[4.]]]], grad_fn=<ConvolutionBackward0>)
+"""
+
+# ==================== 转置卷积中的填充 ====================
+
+# 创建带填充的转置卷积层
+# padding=1: 在输出的四周各去掉1个像素
+# 
+# 填充的作用：
+# - 在普通卷积中，padding增加输入边界
+# - 在转置卷积中，padding减少输出尺寸
+# - padding=1会从输出的每边去掉1行/列
+tconv = nn.ConvTranspose2d(1, 1, kernel_size=2, padding=1, bias=False)
+tconv.weight.data = K
+
+# 执行带填充的转置卷积
+# 对比：不带padding时输出是3x3
+#       带padding=1时，输出变为1x1（从3x3的每边去掉1）
+tconv(X)
+"""
+tensor([[[[4.]]]], grad_fn=<ConvolutionBackward0>)
+"""
+
+# ==================== 卷积和转置卷积的可逆性验证 ====================
+
+# 创建一个随机输入：1个样本，10个通道，16x16的特征图
+X = torch.rand(size=(1, 10, 16, 16))
+
+# 创建普通卷积层
+# 10个输入通道 -> 20个输出通道
+# kernel_size=5: 5x5的卷积核
+# padding=2: 填充2个像素（保持空间尺寸）
+# stride=3: 步幅为3（每3个像素移动一次，缩小特征图）
+conv = nn.Conv2d(10, 20, kernel_size=5, padding=2, stride=3)
+
+# 创建对应的转置卷积层
+# 20个输入通道 -> 10个输出通道（与conv相反）
+# 使用相同的kernel_size、padding、stride
+# 目的：尝试恢复原始尺寸
+tconv = nn.ConvTranspose2d(20, 10, kernel_size=5, padding=2, stride=3)
+
+# 验证：先卷积再转置卷积，输出形状是否与原始输入相同
+# conv(X): 将X下采样
+# tconv(conv(X)): 再上采样回去
+# 如果设置得当，形状应该恢复到原始大小
+# 注意：形状相同不代表值相同，只是尺寸恢复了
+tconv(conv(X)).shape == X.shape
+# True
+
+# ==================== 卷积与矩阵变换的关系 ====================
+
+# 创建一个3x3的输入矩阵
+X = torch.arange(9.0).reshape(3, 3)
+
+# 创建一个2x2的卷积核
+K = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+
+# 使用d2l的corr2d函数执行2D互相关运算（卷积）
+# 3x3的输入，2x2的卷积核 -> 2x2的输出
+Y = d2l.corr2d(X, K)
+print(Y)
+"""
+tensor([[27., 37.],
+        [57., 67.]])
+
+"""
+
+# 这部分展示了卷积操作实际上可以表示为矩阵乘法
+# 这对理解转置卷积很重要
+
+# ==================== 将卷积核转换为矩阵形式 ====================
+
+def kernel2matrix(K):
+    """
+    将2D卷积核转换为矩阵形式
+    
+    为什么要这样做？
+    - 卷积操作可以表示为矩阵乘法
+    - 这有助于理解转置卷积的数学原理
+    - 如果卷积是 Y = W*X，那么转置卷积就是 Z = W^T*Y
+    
+    参数:
+        K: 2x2的卷积核
+    
+    返回:
+        W: 4x9的权重矩阵，可以通过矩阵乘法实现卷积
+    """
+    # k: 临时向量，存储展开的卷积核
+    # W: 权重矩阵，每一行对应输出的一个元素
+    k, W = torch.zeros(5), torch.zeros((4, 9))
+    
+    # 将2x2卷积核的值填充到长度为5的向量中（中间留一个0）
+    # K[0, :] 是卷积核第一行 [1.0, 2.0]
+    # K[1, :] 是卷积核第二行 [3.0, 4.0]
+    k[:2], k[3:5] = K[0, :], K[1, :]
+    
+    # 构造4x9的权重矩阵
+    # 每一行代表输出的一个位置
+    # 每一行包含了该位置对应的卷积核在输入中的布局
+    # 这4行对应2x2输出的4个位置
+    W[0, :5], W[1, 1:6], W[2, 3:8], W[3, 4:] = k, k, k, k
+    
+    return W
+
+# 将卷积核转换为矩阵
+W = kernel2matrix(K)
+print(W)
+# W的每一行代表了卷积核在输入上滑动时的一个位置
+"""
+tensor([[1., 2., 0., 3., 4., 0., 0., 0., 0.],
+        [0., 1., 2., 0., 3., 4., 0., 0., 0.],
+        [0., 0., 0., 1., 2., 0., 3., 4., 0.],
+        [0., 0., 0., 0., 1., 2., 0., 3., 4.]])
+
+"""
+
+# ==================== 验证卷积等价于矩阵乘法 ====================
+
+# 验证：卷积操作 Y = corr2d(X, K) 等价于矩阵乘法 Y = W * X
+# 
+# 步骤：
+# 1. X.reshape(-1): 将3x3的X展平为9x1的向量
+# 2. torch.matmul(W, X.reshape(-1)): 4x9矩阵乘以9x1向量 = 4x1向量
+# 3. .reshape(2, 2): 将4x1向量重塑为2x2矩阵
+# 4. 比较结果是否与Y相同
+print(Y == torch.matmul(W, X.reshape(-1)).reshape(2, 2))
+
+# 如果输出全为True，说明卷积确实可以用矩阵乘法表示
+# 这是理解转置卷积的关键
+
+# ==================== 验证转置卷积等价于转置矩阵乘法 ====================
+
+# 使用我们实现的trans_conv函数对Y进行转置卷积
+# 输入Y是2x2，卷积核K是2x2，输出Z是3x3
+Z = trans_conv(Y, K)
+
+# 验证：转置卷积 Z = trans_conv(Y, K) 等价于 Z = W^T * Y
+# 
+# 关键理解：
+# - 如果卷积是 Y = W * X（从大到小）
+# - 那么转置卷积就是 Z = W^T * Y（从小到大）
+# - W.T 是W的转置矩阵
+# 
+# 步骤：
+# 1. Y.reshape(-1): 将2x2的Y展平为4x1向量
+# 2. torch.matmul(W.T, Y.reshape(-1)): 9x4矩阵乘以4x1向量 = 9x1向量
+# 3. .reshape(3, 3): 将9x1向量重塑为3x3矩阵
+# 4. 比较结果是否与Z相同
+print(Z == torch.matmul(W.T, Y.reshape(-1)).reshape(3, 3))
+
+# 如果输出全为True，说明：
+# 1. 转置卷积确实是矩阵转置乘法
+# 2. 转置卷积可以看作是卷积的"逆操作"（在形状上）
+# 3. 这就是为什么它能用于上采样和语义分割
+```
+
+#### 全连接卷积神经网络(FCN)
+
+传统的卷积神经网络（CNN）在经过一系列卷积层后，通常会接上几个全连接层（Fully Connected layers）。这会导致两个限制：
+
+* 输入尺寸固定：全连接层要求输入向量的长度必须固定，因此原始图像必须经过裁剪（Crop）或缩放（Resize）。
+* 空间信息丢失：全连接层将特征图打平（Flatten），丢失了像素之间的空间相对位置，只能告诉你“图中有一个人”，而不能告诉你“人在哪个位置”。
+
+FCN 的创新之处在于将全连接层全部替换为卷积层。其一般结构为：$Img \rightarrow CNN \rightarrow 1 \times 1 \  Conv \rightarrow Transposed Conv \rightarrow Result$.
+
+参考如下代码，使用预训练模型：
+
+```python
+# ==================== 导入必要的库 ====================
+# %matplotlib inline: 在Jupyter中内嵌显示matplotlib图像
+%matplotlib inline
+# torch: PyTorch深度学习框架
+import torch
+# torchvision: PyTorch的计算机视觉库，包含预训练模型和数据集
+import torchvision
+# nn: PyTorch的神经网络模块
+from torch import nn
+# F: PyTorch的函数式接口，包含各种操作函数
+from torch.nn import functional as F
+# d2l: Dive into Deep Learning工具库
+from d2l import torch as d2l
+
+# ==================== 加载预训练的ResNet-18模型 ====================
+
+# 加载在ImageNet上预训练的ResNet-18模型
+# 
+# 为什么使用预训练模型？
+# 1. 迁移学习：利用在大数据集上学到的特征
+# 2. 加速训练：不需要从头训练
+# 3. 更好的性能：预训练权重提供了良好的初始化
+pretrained_net = torchvision.models.resnet18(pretrained=True)
+
+# 查看ResNet-18的最后三层
+# children()返回模型的直接子模块列表
+# ResNet最后通常是：平均池化层、展平层、全连接层
+print(list(pretrained_net.children())[-3:])
+
+"""
+[Sequential(
+  (0): BasicBlock(
+    (conv1): Conv2d(256, 512, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (bn1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (relu): ReLU(inplace=True)
+    (conv2): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (bn2): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (downsample): Sequential(
+      (0): Conv2d(256, 512, kernel_size=(1, 1), stride=(2, 2), bias=False)
+      (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (1): BasicBlock(
+    (conv1): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (bn1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (relu): ReLU(inplace=True)
+    (conv2): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (bn2): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  )
+), AdaptiveAvgPool2d(output_size=(1, 1)), Linear(in_features=512, out_features=1000, bias=True)]
+"""
+
+# ==================== 构建FCN的特征提取部分 ====================
+
+# 去掉ResNet-18的最后两层（全局平均池化和全连接层）
+# 
+# 为什么要去掉？
+# 1. 全连接层会丢失空间信息
+# 2. 语义分割需要保留空间位置信息
+# 3. FCN的核心思想：全卷积网络，不使用全连接层
+# 
+# [:-2] 保留除最后两层外的所有层
+# *list(...) 将列表展开为参数
+# nn.Sequential 将这些层组合成一个顺序模型
+net = nn.Sequential(*list(pretrained_net.children())[:-2])
+
+# 测试网络输出形状
+# 输入：1张图片，3通道(RGB)，320x480的分辨率
+X = torch.randn(1, 3, 320, 480)
+
+# 输出：特征图的形状
+# 经过ResNet卷积后，空间尺寸缩小，通道数增加到512
+# 预期输出形状：(1, 512, 10, 15)
+# 高度：320/32=10，宽度：480/32=15（ResNet下采样32倍）
+print(net(X).shape)
+# torch.Size([1, 512, 10, 15])
+
+# ==================== 添加FCN的分类和上采样层 ====================
+
+# Pascal VOC数据集包含21个类别
+# 0: 背景，1-20: 各种物体类别（飞机、自行车、鸟等）
+num_classes = 21
+
+# 添加1x1卷积层：将512个通道转换为21个类别通道
+# 
+# 1x1卷积的作用：
+# 1. 降维：从512通道降到21通道
+# 2. 分类：每个通道对应一个类别的预测
+# 3. 保持空间信息：不改变特征图的高度和宽度
+net.add_module('final_conv', nn.Conv2d(512, num_classes, kernel_size=1))
+
+# 添加转置卷积层：将特征图上采样回原始图像大小
+# 
+# 参数解释：
+# - in_channels=num_classes: 输入21个类别通道
+# - out_channels=num_classes: 输出21个类别通道
+# - kernel_size=64: 卷积核大小（较大的核用于平滑上采样）
+# - padding=16: 填充，用于调整输出尺寸
+# - stride=32: 步幅32，将特征图放大32倍（恢复到原始尺寸）
+# 
+# 为什么stride=32？
+# 因为ResNet将图像下采样了32倍，现在需要上采样32倍恢复
+net.add_module('transpose_conv', nn.ConvTranspose2d(num_classes, num_classes,
+                                               kernel_size=64, padding=16,
+                                               stride=32))
+
+# ==================== 双线性插值卷积核 ====================
+
+def bilinear_kernel(in_channels, out_channels, kernel_size):
+    """
+    构造用于双线性插值的转置卷积核
+    
+    为什么需要双线性插值？
+    - 转置卷积的权重需要初始化
+    - 双线性插值是一种平滑的上采样方法
+    - 它比随机初始化的权重效果更好，训练更稳定
+    
+    双线性插值原理：
+    - 距离中心越近的像素权重越大
+    - 距离中心越远的像素权重越小
+    - 这样可以产生平滑的放大效果
+    
+    参数:
+        in_channels: 输入通道数
+        out_channels: 输出通道数
+        kernel_size: 卷积核大小
+    
+    返回:
+        weight: 初始化好的卷积核权重
+    """
+    # 计算中心位置的因子
+    # factor用于计算权重衰减的速度
+    factor = (kernel_size + 1) // 2
+    
+    # 确定卷积核的中心位置
+    if kernel_size % 2 == 1:
+        # 奇数大小：中心是整数位置
+        center = factor - 1
+    else:
+        # 偶数大小：中心是0.5的位置
+        center = factor - 0.5
+    
+    # 创建网格坐标
+    # og[0]: 行坐标网格 (kernel_size, 1)
+    # og[1]: 列坐标网格 (1, kernel_size)
+    og = (torch.arange(kernel_size).reshape(-1, 1),
+          torch.arange(kernel_size).reshape(1, -1))
+    
+    # 计算双线性插值的权重
+    # 公式：(1 - |x-center|/factor) * (1 - |y-center|/factor)
+    # 离中心越近，权重越大；离中心越远，权重越小
+    filt = (1 - torch.abs(og[0] - center) / factor) * \
+           (1 - torch.abs(og[1] - center) / factor)
+    
+    # 初始化权重张量
+    # 形状：(in_channels, out_channels, kernel_size, kernel_size)
+    weight = torch.zeros((in_channels, out_channels,
+                          kernel_size, kernel_size))
+    
+    # 只为对角线位置（输入通道i对应输出通道i）赋值
+    # 这保证了每个通道独立处理，不会混合颜色通道
+    weight[range(in_channels), range(out_channels), :, :] = filt
+    
+    return weight
+
+# ==================== 测试双线性插值上采样效果 ====================
+
+# 创建一个转置卷积层用于测试
+# 3个输入通道(RGB)，3个输出通道，卷积核4x4
+# padding=1, stride=2: 将图像放大2倍
+# bias=False: 不使用偏置项
+conv_trans = nn.ConvTranspose2d(3, 3, kernel_size=4, padding=1, stride=2,
+                                bias=False)
+
+# 用双线性插值核初始化转置卷积的权重
+conv_trans.weight.data.copy_(bilinear_kernel(3, 3, 4))
+
+# 读取测试图像并转换为张量
+# ToTensor()会将PIL图像转换为形状(C, H, W)的张量，值域[0,1]
+img = torchvision.transforms.ToTensor()(d2l.Image.open('./catdog.jpg'))
+
+# 添加批次维度：(C, H, W) -> (1, C, H, W)
+X = img.unsqueeze(0)
+
+# 执行转置卷积，放大图像
+Y = conv_trans(X)
+
+# 移除批次维度并调整通道顺序以便显示
+# (1, C, H, W) -> (C, H, W) -> (H, W, C)
+out_img = Y[0].permute(1, 2, 0).detach()
+
+# 设置图像显示大小
+d2l.set_figsize()
+
+# 显示原始图像
+print('input image shape:', img.permute(1, 2, 0).shape)
+d2l.plt.imshow(img.permute(1, 2, 0))
+
+# 显示放大后的图像（应该是原始图像的2倍大小）
+print('output image shape:', out_img.shape)
+d2l.plt.imshow(out_img)
+# input image shape: torch.Size([561, 728, 3])
+# output image shape: torch.Size([1122, 1456, 3])
+# <matplotlib.image.AxesImage at 0x7d5bc2196480>
+```
+![fcn1](./src/fcn1.png)
+```python
+# ==================== 初始化FCN的转置卷积层 ====================
+
+# 使用双线性插值核初始化FCN网络中的转置卷积层
+# 
+# 参数说明：
+# - num_classes: 21个类别，输入和输出通道都是21
+# - 64: 卷积核大小
+# 
+# 这样初始化的好处：
+# 1. 提供了良好的起点，而不是随机权重
+# 2. 保证了平滑的上采样效果
+# 3. 加速训练收敛
+W = bilinear_kernel(num_classes, num_classes, 64)
+net.transpose_conv.weight.data.copy_(W)
+
+# ==================== 加载VOC数据集 ====================
+
+# 设置批次大小和裁剪尺寸
+batch_size = 32           # 每批处理32张图像
+crop_size = (320, 480)    # 将图像裁剪为320x480
+
+# 加载VOC语义分割数据集
+# train_iter: 训练集数据迭代器
+# test_iter: 测试集数据迭代器
+# 
+# 这个函数会：
+# 1. 下载VOC2012数据集（如果还没下载）
+# 2. 创建数据集对象
+# 3. 创建数据加载器，支持批处理和多进程加载
+train_iter, test_iter = d2l.load_data_voc(batch_size, crop_size)
+
+# ==================== 定义损失函数并开始训练 ====================
+
+def loss(inputs, targets):
+    """
+    语义分割的损失函数
+    
+    参数:
+        inputs: 模型预测，形状(batch_size, num_classes, H, W)
+        targets: 真实标签，形状(batch_size, H, W)，每个元素是类别索引
+    
+    返回:
+        平均损失值
+    
+    实现细节：
+    - cross_entropy: 计算每个像素的交叉熵损失
+    - reduction='none': 不自动求平均，保留每个像素的损失
+    - .mean(1).mean(1): 对高度和宽度维度求平均
+    """
+    return F.cross_entropy(inputs, targets, reduction='none').mean(1).mean(1)
+
+
+# ==================== 设置训练参数 ====================
+num_epochs = 5              # 训练5个epoch
+lr = 0.001                  # 学习率
+wd = 1e-3                   # 权重衰减（L2正则化）
+devices = d2l.try_all_gpus() # 尝试使用所有可用的GPU
+
+# 创建优化器
+# SGD: 随机梯度下降
+# weight_decay: 权重衰减，防止过拟合
+trainer = torch.optim.SGD(net.parameters(), lr=lr, weight_decay=wd)
+
+# 开始训练
+# train_ch13是d2l提供的训练函数，专门用于计算机视觉任务
+# 它会：
+# 1. 在每个epoch遍历训练数据
+# 2. 计算损失并更新权重
+# 3. 在测试集上评估性能
+# 4. 绘制训练曲线
+d2l.train_ch13(net, train_iter, test_iter, loss, trainer, num_epochs, devices)
+```
+
+训练结果如下：
+
+```python
+loss 0.419, train acc 0.871, test acc 0.849
+82.9 examples/sec on [device(type='cuda', index=0)]
+```
+![fcn2](./src/fcn2.png)
+
+预测：
+
+```python
+# ==================== 预测和可视化 ====================
+
+def predict(img):
+    """
+    对单张图像进行语义分割预测
+    
+    参数:
+        img: 输入图像张量，形状(C, H, W)
+    
+    返回:
+        pred: 预测的类别索引，形状(H, W)
+    """
+    # 归一化图像（使用与训练时相同的归一化）
+    # unsqueeze(0): 添加批次维度 (C, H, W) -> (1, C, H, W)
+    X = test_iter.dataset.normalize_image(img).unsqueeze(0)
+    
+    # 在GPU上进行预测
+    # net(X): 得到形状(1, 21, H, W)的输出，每个通道是一个类别的分数
+    # argmax(dim=1): 在类别维度上取最大值的索引，得到(1, H, W)
+    pred = net(X.to(devices[0])).argmax(dim=1)
+    
+    # 移除批次维度，返回(H, W)的类别索引
+    return pred.reshape(pred.shape[1], pred.shape[2])
+
+
+def label2image(pred):
+    """
+    将类别索引转换为RGB彩色图像
+    
+    参数:
+        pred: 类别索引张量，形状(H, W)
+    
+    返回:
+        彩色分割图，形状(H, W, 3)
+    """
+    # VOC_COLORMAP是预定义的颜色映射表
+    # 将其转换为张量并放到GPU上
+    colormap = torch.tensor(d2l.VOC_COLORMAP, device=devices[0])
+    
+    # 确保pred是长整型（用作索引）
+    X = pred.long()
+    
+    # 使用类别索引从颜色映射表中查找对应的RGB颜色
+    # colormap[X, :] 会根据X中的类别索引返回对应的RGB值
+    return colormap[X, :]
+
+
+# ==================== 在测试集上进行预测和可视化 ====================
+
+# 下载VOC数据集并获取路径
+voc_dir = d2l.download_extract('voc2012', 'VOCdevkit/VOC2012')
+
+# 读取测试集的图像和标注
+test_images, test_labels = d2l.read_voc_images(voc_dir, False)
+
+# 设置要显示的图像数量
+n, imgs = 4, []
+
+# 对前n张测试图像进行预测
+for i in range(n):
+    # 定义裁剪区域：从左上角(0,0)开始，裁剪320x480的区域
+    crop_rect = (0, 0, 320, 480)
+    
+    # 裁剪原始图像
+    X = torchvision.transforms.functional.crop(test_images[i], *crop_rect)
+    
+    # 预测并转换为彩色图像
+    pred = label2image(predict(X))
+    
+    # 收集三张图像：原图、预测结果、真实标注
+    imgs += [
+        X.permute(1, 2, 0),      # 原始图像，调整为(H,W,C)格式
+        pred.cpu(),               # 预测的彩色分割图，移到CPU
+        torchvision.transforms.functional.crop(
+            test_labels[i], *crop_rect).permute(1, 2, 0)  # 真实标注
+    ]
+
+# 显示结果：3行，每行n张图像
+# 第一行：原始图像
+# 第二行：模型预测结果
+# 第三行：真实标注
+# imgs[::3]: 每隔3个取一个，即原始图像
+# imgs[1::3]: 预测结果
+# imgs[2::3]: 真实标注
+d2l.show_images(imgs[::3] + imgs[1::3] + imgs[2::3], 3, n, scale=2)
+```
+
+预测结果如下：
+
+![fcn3](./src/fcn3.png)
