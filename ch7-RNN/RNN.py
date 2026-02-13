@@ -5,8 +5,11 @@
 # d2l: Dive into Deep Learning工具库，提供深度学习相关的辅助函数
 import collections  # 导入collections模块，用于词频统计
 import re  # 导入正则表达式模块，用于文本清理
+import math  # 导入数学模块，用于计算等
 import random   # random: Python标准库，用于随机数生成
 import torch  # 导入PyTorch库，用于张量操作和深度学习
+from torch import nn  # 从torch导入神经网络模块，提供构建神经网络的工具
+from torch.nn import functional as F  # 导入torch.nn.functional模块，提供常用的函数，如激活函数、损失函数等
 from d2l import torch as d2l  # 从d2l导入torch相关工具
 
 # %%
@@ -587,3 +590,388 @@ def load_data_time_machine(batch_size, num_steps,
     # 返回迭代器和词汇表
     # data_iter.vocab: 访问SeqDataLoader内部的词汇表
     return data_iter, data_iter.vocab
+
+# ==================================================
+# 初始化RNN隐藏状态
+# ==================================================
+def init_rnn_state(batch_size, num_hiddens, device):
+    """
+    初始化RNN的隐藏状态
+    
+    在每个批次开始时，需要初始化隐藏状态为零向量
+    
+    参数:
+        batch_size: 批量大小
+        num_hiddens: 隐藏层单元数
+        device: 计算设备
+    
+    返回:
+        包含一个张量的元组，形状为(batch_size, num_hiddens)，初始值全为0
+    """
+    return (torch.zeros((batch_size, num_hiddens), device=device), )
+
+# ==================================================
+# RNN前向传播函数
+# ==================================================
+def rnn(inputs, state, params):
+    """
+    RNN的前向传播计算
+    
+    核心公式: H_t = tanh(X_t @ W_xh + H_{t-1} @ W_hh + b_h)
+             Y_t = H_t @ W_hq + b_q
+    
+    参数:
+        inputs: 输入序列，形状为(时间步数, 批量大小, 词表大小)，已经过one-hot编码
+        state: 隐藏状态，包含一个张量H
+        params: 模型参数 [W_xh, W_hh, b_h, W_hq, b_q]
+    
+    返回:
+        outputs: 所有时间步的输出，形状为(时间步数*批量大小, 词表大小)
+        (H,): 最后一个时间步的隐藏状态
+    """
+    W_xh, W_hh, b_h, W_hq, b_q = params
+    H, = state  # 解包隐藏状态
+    outputs = []  # 存储每个时间步的输出
+    
+    # 之前转置过了，所以时序维度在第一个维度上，可以直接迭代读取每个时间步的输入
+    # X的形状是（时间步数，批量大小，词表大小）
+    for X in inputs:
+        # 更新隐藏状态：H_t = tanh(X_t * W_xh + H_{t-1} * W_hh + b_h)
+        # 激活函数使用tanh，将值压缩到(-1, 1)范围内
+        H = torch.tanh(X @ W_xh + H @ W_hh + b_h)
+        # 计算输出：Y_t = H_t * W_hq + b_q
+        # 输出层不使用激活函数，因为后面会使用交叉熵损失函数，它会将softmax计算包含在内
+        Y = H @ W_hq + b_q
+        outputs.append(Y)
+    
+    # 将所有时间步的输出拼接成一个张量，形状为(时间步数*批量大小, 词表大小)
+    return torch.cat(outputs, dim=0), (H, )
+
+# ==================================================
+# 从零开始实现的RNN模型类
+# ==================================================
+class RNNModelScratch:
+    """
+    从零开始实现的循环神经网络模型
+    
+    该类封装了RNN的参数初始化、状态初始化和前向传播功能
+    """
+    def __init__(self, vocab_size, num_hiddens, device,
+                 get_params, init_state, forward_fn):
+        """
+        初始化RNN模型
+        
+        参数:
+            vocab_size: 词汇表大小
+            num_hiddens: 隐藏层单元数
+            device: 计算设备
+            get_params: 参数初始化函数
+            init_state: 状态初始化函数
+            forward_fn: 前向传播函数
+        """
+        self.vocab_size, self.num_hiddens = vocab_size, num_hiddens
+        self.params = get_params(vocab_size, num_hiddens, device)  # 初始化所有参数
+        self.init_state, self.forward_fn = init_state, forward_fn
+
+    def __call__(self, X, state):
+        """
+        模型的调用接口
+        
+        参数:
+            X: 输入数据，形状为(批量大小, 时间步数)，包含字符索引
+            state: 隐藏状态
+        
+        返回:
+            输出和新的隐藏状态
+        """
+        # 将输入索引转换为one-hot编码，并转置使时间步在第一维
+        X = F.one_hot(X.T, self.vocab_size).type(torch.float32)
+        return self.forward_fn(X, state, self.params)
+
+    def begin_state(self, batch_size, device):
+        """初始化隐藏状态"""
+        return self.init_state(batch_size, self.num_hiddens, device)
+    
+# ==================================================
+# 预测函数：根据前缀生成后续文本
+# ==================================================
+def predict_ch8(prefix, num_preds, net, vocab, device):
+    """
+    基于给定前缀预测后续字符
+    
+    工作流程：
+    1. 使用前缀字符预热模型（更新隐藏状态）
+    2. 自回归生成后续字符（每次用上一步的输出作为下一步的输入）
+    
+    参数:
+        prefix: 前缀字符串，用于初始化模型状态
+        num_preds: 要预测的字符数量
+        net: RNN模型
+        vocab: 词汇表
+        device: 计算设备
+    
+    返回:
+        生成的完整文本（前缀 + 预测的字符）
+    """
+    state = net.begin_state(batch_size=1, device=device)  # 初始化状态
+    outputs = [vocab[prefix[0]]]  # 输出列表，先放入前缀的第一个字符的索引
+    # 定义获取输入的lambda函数：取outputs的最后一个元素作为输入
+    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
+    
+    # 使用前缀的剩余字符预热模型，更新隐藏状态
+    for y in prefix[1:]:
+        _, state = net(get_input(), state)  # 只关心状态更新，不保存输出
+        outputs.append(vocab[y])  # 将前缀字符的索引加入输出列表
+    
+    # 开始自回归预测：生成num_preds个新字符
+    for _ in range(num_preds):
+        y, state = net(get_input(), state)  # 获取预测输出
+        # argmax找到概率最大的字符索引
+        outputs.append(int(y.argmax(dim=1).reshape(1)))
+    
+    # 将索引列表转换回字符串
+    return ''.join([vocab.index_to_token[i] for i in outputs])
+
+# ==================================================
+# 梯度裁剪：防止梯度爆炸
+# ==================================================
+def grad_clipping(net, theta):
+    """
+    裁剪梯度，防止梯度爆炸
+    
+    在RNN训练中，梯度可能会随时间步累积而爆炸性增长
+    梯度裁剪通过限制梯度的L2范数来缓解这个问题
+    
+    参数:
+        net: 神经网络模型
+        theta: 梯度裁剪的阈值
+    
+    工作原理:
+        1. 计算所有参数梯度的L2范数: norm = sqrt(sum(grad^2))
+        2. 如果 norm > theta，则将所有梯度缩放: grad = grad * (theta / norm)
+    """
+    # 获取所有需要梯度的参数
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    
+    # 计算所有参数梯度的L2范数
+    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    
+    # 如果范数超过阈值，按比例缩放所有梯度
+    if norm > theta:
+        for param in params:
+            param.grad[:] *= theta / norm
+            
+# ==================================================
+# 训练一个epoch：遍历整个数据集一次
+# ==================================================
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+    """
+    训练模型一个epoch
+    
+    参数:
+        net: RNN模型
+        train_iter: 训练数据迭代器
+        loss: 损失函数
+        updater: 优化器或自定义更新函数
+        device: 计算设备
+        use_random_iter: 是否使用随机采样（True）还是顺序分区（False）
+    
+    返回:
+        perplexity: 困惑度 = exp(平均损失)，衡量模型预测的不确定性
+        speed: 处理速度（词元/秒）
+    """
+    state, timer = None, d2l.Timer()  # 初始化状态和计时器
+    metric = d2l.Accumulator(2)  # 累加器：[训练损失总和, 词元数量]
+    
+    for X, Y in train_iter:  # 遍历每个小批量
+        if state is None or use_random_iter:
+            # 在使用随机抽样时，每个小批量的序列是独立的，需要重新初始化状态
+            state = net.begin_state(batch_size=X.shape[0], device=device)
+        else:
+            # 使用顺序分区时，相邻批次的序列是连续的
+            # 需要分离（detach）隐藏状态，截断梯度的反向传播
+            # 这样可以避免梯度在过长的序列上累积，同时保留状态信息用于预测
+            if isinstance(state, tuple):
+                # LSTM 返回元组 (h, c)
+                state = tuple(s.detach() for s in state)
+            else:
+                # GRU 和 RNN 返回张量
+                state = state.detach()
+        
+        # 准备标签：将Y转置并展平成一维向量
+        y = Y.T.reshape(-1)
+        X, y = X.to(device), y.to(device)
+        
+        # 前向传播
+        y_hat, state = net(X, state)
+        # 计算交叉熵损失的平均值
+        l = loss(y_hat, y.long()).mean()
+        
+        # 反向传播和参数更新
+        if isinstance(updater, torch.optim.Optimizer):
+            # 使用PyTorch优化器
+            updater.zero_grad()  # 梯度清零
+            l.backward()  # 反向传播计算梯度
+            grad_clipping(net, 1)  # 裁剪梯度，阈值为1
+            updater.step()  # 更新参数
+        else:
+            # 使用自定义的SGD更新函数
+            l.backward()
+            grad_clipping(net, 1)
+            updater(X.shape[0])  # 传入批量大小进行更新
+        
+        # 累积损失和词元数
+        metric.add(l * y.numel(), y.numel())
+    
+    # 返回困惑度和处理速度
+    # 困惑度 = exp(平均损失)，越低表示模型越好
+    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+
+# ==================================================
+# 完整的RNN训练函数
+# ==================================================
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
+              use_random_iter=False):
+    """
+    训练RNN模型的完整流程
+    
+    参数:
+        net: RNN模型
+        train_iter: 训练数据迭代器
+        vocab: 词汇表
+        lr: 学习率
+        num_epochs: 训练轮数
+        device: 计算设备
+        use_random_iter: 是否使用随机采样（默认False，使用顺序分区）
+    
+    功能:
+        1. 训练指定轮数
+        2. 每10轮打印一次预测结果
+        3. 实时绘制困惑度曲线
+        4. 训练结束后展示最终预测结果
+    """
+    loss = nn.CrossEntropyLoss()  # 交叉熵损失函数（内置softmax）
+    # 创建动画绘图器，用于实时显示训练过程中的困惑度变化
+    animator = d2l.Animator(xlabel='epoch', ylabel='perplexity',
+                            legend=['train'], xlim=[10, num_epochs])
+    
+    # ===== 初始化优化器 =====
+    if isinstance(net, nn.Module):
+        # 对于nn.Module模型，使用PyTorch的SGD优化器
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        # 对于自定义模型，使用d2l提供的SGD函数
+        updater = lambda batch_size: d2l.sgd(net.params, lr, batch_size)
+    
+    # 定义预测函数：固定生成50个字符
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
+    
+    # ===== 训练和预测 =====
+    for epoch in range(num_epochs):
+        # 训练一个epoch
+        ppl, speed = train_epoch_ch8(
+            net, train_iter, loss, updater, device, use_random_iter)
+        
+        # 每10轮打印一次当前的预测结果
+        if (epoch + 1) % 10 == 0:
+            print(predict('time traveller'))
+            animator.add(epoch + 1, [ppl])  # 在图表中添加当前困惑度
+    
+    # ===== 训练完成，输出最终结果 =====
+    print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(device)}')
+    print(predict('time traveller'))  # 预测 "time traveller" 后的文本
+    print(predict('traveller'))  # 预测 "traveller" 后的文本
+    
+# ==================================================
+# 完整的RNN模型类（封装RNN层和输出层）
+# ==================================================
+class RNNModel(nn.Module):
+    """
+    循环神经网络模型
+    
+    架构:
+        输入 -> One-hot编码 -> RNN层 -> 全连接层 -> 输出
+    
+    该类将RNN层和输出层组合成一个完整的字符级语言模型
+    """
+    def __init__(self, rnn_layer, vocab_size, **kwargs):
+        """
+        初始化RNN模型
+        
+        参数:
+            rnn_layer: PyTorch的RNN层（nn.RNN/nn.LSTM/nn.GRU）
+            vocab_size: 词汇表大小
+        """
+        super(RNNModel, self).__init__(**kwargs)
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size  # 隐藏层维度
+        
+        # 判断RNN是否为双向
+        # 如果RNN是双向的（之后将介绍），num_directions应该是2，否则应该是1
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            # 单向RNN：隐藏层到输出层的线性变换
+            self.linear = nn.Linear(self.num_hiddens, self.vocab_size)
+        else:
+            self.num_directions = 2
+            # 双向RNN：隐藏层维度翻倍（正向+反向）
+            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
+
+    def forward(self, inputs, state):
+        """
+        前向传播
+        
+        参数:
+            inputs: 输入序列，形状为(batch_size, num_steps)，包含字符索引
+            state: 隐藏状态
+        
+        返回:
+            output: 输出logits，形状为(num_steps*batch_size, vocab_size)
+            state: 更新后的隐藏状态
+        """
+        # 将输入索引转换为one-hot编码
+        # inputs.T: (num_steps, batch_size)
+        # X: (num_steps, batch_size, vocab_size)
+        X = F.one_hot(inputs.T.long(), self.vocab_size)
+        X = X.to(torch.float32)
+        
+        # RNN前向传播
+        # Y: (num_steps, batch_size, num_hiddens) - 每个时间步的隐藏状态输出
+        Y, state = self.rnn(X, state)
+        
+        # 全连接层处理
+        # 首先将Y的形状改为(时间步数*批量大小, 隐藏单元数)
+        # 这样可以批量处理所有时间步的输出
+        # 输出形状是(时间步数*批量大小, 词表大小)
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))
+        return output, state
+
+    def begin_state(self, device, batch_size=1):
+        """
+        初始化隐藏状态
+        
+        参数:
+            device: 计算设备
+            batch_size: 批量大小
+        
+        返回:
+            初始隐藏状态（形状和类型取决于RNN类型）
+        """
+        if not isinstance(self.rnn, nn.LSTM):
+            # nn.GRU和nn.RNN以张量作为隐藏状态
+            # 形状: (num_directions * num_layers, batch_size, num_hiddens)
+            return  torch.zeros((self.num_directions * self.rnn.num_layers,
+                                 batch_size, self.num_hiddens),
+                                device=device)
+        else:
+            # nn.LSTM以元组作为隐藏状态（包括隐藏状态h和记忆细胞c）
+            return (torch.zeros((
+                self.num_directions * self.rnn.num_layers,
+                batch_size, self.num_hiddens), device=device),
+                    torch.zeros((
+                        self.num_directions * self.rnn.num_layers,
+                        batch_size, self.num_hiddens), device=device))
