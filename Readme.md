@@ -159,6 +159,7 @@
   - [Transformer](#transformer)
     - [注意力机制](#注意力机制)
       - [Q、K、V](#qkv)
+    - [NW核回归](#nw核回归)
   - [NLP](#nlp)
     - [预训练](#预训练)
       - [词嵌入(word2vec)](#词嵌入word2vec)
@@ -5907,7 +5908,26 @@ $$Score(y) = \frac{1}{T^\alpha} \sum_{t=1}^{T} \log P(y_t | y_1, \dots, y_{t-1},
 
 通俗的比喻： 你去图书馆找书。你的检索词就是 Q，每本书的封面标题和简介就是 K，而书里面的具体内容就是 V。注意力机制计算的就是你的检索词 (Q) 与所有书的标题 (K) 的匹配程度，然后根据匹配程度的高低，为你提取相应的书本内容 (V) 的加权总和。
 
+### NW核回归
 
+这一部分主要为数学推导，主要理解NW核回归事实上是：
+
+$$
+f(x) = \sum_{i=1}^{n} \text{Softmax}(x,x_i) \cdot y_i \\
+     = \sum_{i=1}^{n} \text{Softmax}(-\frac{1}{2}(x-x_i)^2) \cdot y_i
+$$
+
+这里使用了高斯核：$K(\mu) = \frac{1}{\sqrt{2\pi}} \text{exp}(-\frac{{\mu}^2}{2})$
+
+若是带可学习的宽度参数$w$：
+
+$$
+f(x) = \sum_{i=1}^{n} \text{Softmax}(-\frac{1}{2}((x-x_i) \cdot w)^2) \cdot y_i
+$$
+
+这里的$w$决定了热力图中绘制的权重的宽度。
+
+最后，简单理解NW核回归：区别于平均池化和最大池化的简单`mean`或者`max`，注意力池化将`mean`替换为了一个softmax。
 
 
 ## NLP
